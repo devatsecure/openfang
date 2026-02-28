@@ -45,12 +45,20 @@ async function startConnection() {
   connStatus = 'disconnected';
   statusMessage = 'Connecting...';
 
+  // In-memory message store for retry handling
+  const msgStore = {};
+
   sock = makeWASocket({
     version,
     auth: state,
     logger,
     printQRInTerminal: true,
     browser: ['OpenFang', 'Desktop', '1.0.0'],
+    // Required for Baileys 6.x to handle pre-key message retries
+    getMessage: async (key) => {
+      const id = key.remoteJid + ':' + key.id;
+      return msgStore[id] || undefined;
+    },
   });
 
   // Save credentials whenever they update
@@ -120,6 +128,10 @@ async function startConnection() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
+      // Store message for retry handling
+      if (msg.key.id && msg.key.remoteJid) {
+        msgStore[msg.key.remoteJid + ':' + msg.key.id] = msg.message;
+      }
       // Skip own outgoing messages (prevents echo loop)
       if (msg.key.fromMe) continue;
       // Skip status broadcasts
