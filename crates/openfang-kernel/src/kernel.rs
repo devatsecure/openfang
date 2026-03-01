@@ -1019,6 +1019,29 @@ impl OpenFangKernel {
             }
         }
 
+        // Reconcile restored agents with hand registry — mark hands as active
+        // if their agent was restored from SQLite.
+        {
+            let hand_defs: Vec<(String, String)> = kernel
+                .hand_registry
+                .list_definitions()
+                .iter()
+                .map(|d| (d.id.clone(), d.agent.name.clone()))
+                .collect();
+
+            for entry in kernel.registry.list() {
+                for (hand_id, hand_agent_name) in &hand_defs {
+                    if entry.name == *hand_agent_name {
+                        kernel.hand_registry.register_restored(
+                            hand_id,
+                            entry.id,
+                            &entry.name,
+                        );
+                    }
+                }
+            }
+        }
+
         // Validate routing configs against model catalog
         for entry in kernel.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
@@ -2844,10 +2867,25 @@ impl OpenFangKernel {
                 manifest.model.system_prompt, resolved.prompt_block
             );
         }
-        if !resolved.env_vars.is_empty() {
+
+        // Collect env vars the agent's shell_exec sandbox should allow:
+        // 1) env vars from settings options (e.g. provider API keys from selected STT/TTS)
+        // 2) env vars from hand requirements (e.g. TWITTER_BEARER_TOKEN)
+        let mut allowed_env = resolved.env_vars;
+        for req in &def.requires {
+            if matches!(
+                req.requirement_type,
+                openfang_hands::RequirementType::ApiKey
+                    | openfang_hands::RequirementType::EnvVar
+            ) && !allowed_env.contains(&req.check_value)
+            {
+                allowed_env.push(req.check_value.clone());
+            }
+        }
+        if !allowed_env.is_empty() {
             manifest.metadata.insert(
                 "hand_allowed_env".to_string(),
-                serde_json::to_value(&resolved.env_vars).unwrap_or_default(),
+                serde_json::to_value(&allowed_env).unwrap_or_default(),
             );
         }
 
