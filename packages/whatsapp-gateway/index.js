@@ -50,6 +50,7 @@ let statusMessage = 'Not started';
 let lastActivityAt = 0;       // timestamp of last known good Baileys activity
 let heartbeatTimer = null;    // setInterval handle for heartbeat watchdog
 let reconnecting = false;     // guard against overlapping reconnect attempts
+let conflictCount = 0;        // consecutive conflict disconnects (for backoff)
 const startedAt = Date.now(); // process start time
 
 // ---------------------------------------------------------------------------
@@ -100,7 +101,7 @@ async function triggerReconnect() {
   reconnecting = true;
 
   console.log('[gateway] Self-healing: initiating reconnect...');
-  connStatus = 'disconnected';
+  connStatus = 'reconnecting';
   statusMessage = 'Reconnecting (auto-heal)...';
 
   // Clean up existing socket
@@ -211,8 +212,18 @@ async function startConnection() {
         if (fs.existsSync(authPath)) {
           fs.rmSync(authPath, { recursive: true, force: true });
         }
+      } else if (statusCode === 440 || reason.includes('conflict')) {
+        // Conflict — another session replaced us. Back off to avoid ping-pong loop.
+        conflictCount += 1;
+        const backoff = Math.min(conflictCount * 15_000, 60_000); // 15s, 30s, 45s, max 60s
+        console.log(`[gateway] Conflict disconnect #${conflictCount}, backing off ${backoff / 1000}s`);
+        connStatus = 'reconnecting';
+        statusMessage = `Conflict — retrying in ${backoff / 1000}s`;
+        setTimeout(() => startConnection(), backoff);
       } else {
         // All other disconnects (restart required, timeout, unknown) — auto-reconnect
+        conflictCount = 0;
+        connStatus = 'reconnecting';
         console.log('[gateway] Reconnecting in 3s...');
         statusMessage = 'Reconnecting...';
         setTimeout(() => startConnection(), 3000);
@@ -225,6 +236,7 @@ async function startConnection() {
       qrDataUrl = '';
       statusMessage = 'Connected to WhatsApp';
       reconnecting = false;
+      conflictCount = 0;
       console.log('[gateway] Connected to WhatsApp!');
       startHeartbeat();
     }
@@ -517,6 +529,12 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, 200, {
           reconnected: false,
           reason: 'already_connected',
+        });
+      }
+      if (connStatus === 'reconnecting' || reconnecting) {
+        return jsonResponse(res, 200, {
+          reconnected: false,
+          reason: 'already_reconnecting',
         });
       }
       triggerReconnect();

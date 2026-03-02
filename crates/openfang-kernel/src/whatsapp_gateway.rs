@@ -22,10 +22,10 @@ const GATEWAY_PACKAGE_JSON: &str =
 const DEFAULT_GATEWAY_PORT: u16 = 3009;
 
 /// Maximum restart attempts before giving up.
-const MAX_RESTARTS: u32 = 3;
+const MAX_RESTARTS: u32 = 10;
 
-/// Restart backoff delays in seconds: 5s, 10s, 20s.
-const RESTART_DELAYS: [u64; 3] = [5, 10, 20];
+/// Restart backoff delays in seconds (wraps at last value).
+const RESTART_DELAYS: [u64; 5] = [5, 10, 20, 30, 60];
 
 /// Get the gateway installation directory.
 fn gateway_dir() -> PathBuf {
@@ -366,6 +366,11 @@ pub async fn run_whatsapp_health_loop(kernel: &Arc<super::kernel::OpenFangKernel
 
     let mut consecutive_disconnects = 0u32;
     let mut total_reconnects = 0u32;
+    let mut last_reconnect_trigger: Option<std::time::Instant> = None;
+
+    // Cooldown period after triggering a reconnect — don't trigger another one
+    // for at least 90 seconds to let the gateway finish its own reconnect cycle.
+    const RECONNECT_COOLDOWN_SECS: u64 = 90;
 
     loop {
         interval.tick().await;
@@ -385,6 +390,13 @@ pub async fn run_whatsapp_health_loop(kernel: &Arc<super::kernel::OpenFangKernel
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
+                // Check if gateway is already handling its own reconnect
+                let conn_status = body
+                    .get("conn_status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let is_reconnecting = conn_status == "reconnecting";
+
                 if connected {
                     consecutive_disconnects = 0;
                     if let Ok(mut guard) = health_state.write() {
@@ -393,6 +405,17 @@ pub async fn run_whatsapp_health_loop(kernel: &Arc<super::kernel::OpenFangKernel
                             ws_connected: true,
                             last_ok: Some(chrono::Utc::now().to_rfc3339()),
                             last_error: None,
+                            reconnect_attempts: total_reconnects,
+                        });
+                    }
+                } else if is_reconnecting {
+                    // Gateway is already reconnecting on its own — don't interfere
+                    if let Ok(mut guard) = health_state.write() {
+                        *guard = Some(WhatsAppGatewayHealth {
+                            process_alive: true,
+                            ws_connected: false,
+                            last_ok: guard.as_ref().and_then(|h| h.last_ok.clone()),
+                            last_error: Some("Gateway is reconnecting".to_string()),
                             reconnect_attempts: total_reconnects,
                         });
                     }
@@ -414,10 +437,20 @@ pub async fn run_whatsapp_health_loop(kernel: &Arc<super::kernel::OpenFangKernel
                         });
                     }
 
-                    // After N consecutive failures, trigger reconnect
+                    // After N consecutive failures, trigger reconnect — but respect cooldown
                     if consecutive_disconnects >= RECONNECT_AFTER_CHECKS {
+                        let in_cooldown = last_reconnect_trigger
+                            .map(|t| t.elapsed().as_secs() < RECONNECT_COOLDOWN_SECS)
+                            .unwrap_or(false);
+
+                        if in_cooldown {
+                            // Still in cooldown — don't pile on
+                            continue;
+                        }
+
                         info!("WhatsApp gateway: triggering auto-reconnect");
                         total_reconnects += 1;
+                        last_reconnect_trigger = Some(std::time::Instant::now());
                         match trigger_gateway_reconnect(port).await {
                             Ok(()) => {
                                 info!("WhatsApp gateway: reconnect triggered successfully");
@@ -521,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_restart_backoff_delays() {
-        assert_eq!(RESTART_DELAYS, [5, 10, 20]);
-        assert_eq!(MAX_RESTARTS, 3);
+        assert_eq!(RESTART_DELAYS, [5, 10, 20, 30, 60]);
+        assert_eq!(MAX_RESTARTS, 10);
     }
 }
