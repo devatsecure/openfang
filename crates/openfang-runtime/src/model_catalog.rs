@@ -5,12 +5,13 @@
 
 use openfang_types::model_catalog::{
     AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo, AI21_BASE_URL, ANTHROPIC_BASE_URL,
-    BEDROCK_BASE_URL, CEREBRAS_BASE_URL, COHERE_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL,
-    GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL,
-    LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL,
-    OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
-    ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CLAUDE_CODE_PROXY_BASE_URL, COHERE_BASE_URL,
+    DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL,
+    GROQ_BASE_URL, HUGGINGFACE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL,
+    MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
+    PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
+    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL, ZHIPU_BASE_URL,
+    ZHIPU_CODING_BASE_URL,
 };
 use std::collections::HashMap;
 
@@ -627,6 +628,16 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             display_name: "Claude Code".into(),
             api_key_env: String::new(),
             base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        // ── Claude Code Proxy (Agent SDK) ─────────────────────────
+        ProviderInfo {
+            id: "claude-code-proxy".into(),
+            display_name: "Claude Code Proxy".into(),
+            api_key_env: String::new(),
+            base_url: CLAUDE_CODE_PROXY_BASE_URL.into(),
             key_required: false,
             auth_status: AuthStatus::NotRequired,
             model_count: 0,
@@ -2884,6 +2895,51 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_streaming: true,
             aliases: vec!["claude-code-haiku".into()],
         },
+        // ══════════════════════════════════════════════════════════════
+        // Claude Code Proxy (3) — Agent SDK proxy, Anthropic Messages API
+        // ══════════════════════════════════════════════════════════════
+        ModelCatalogEntry {
+            id: "claude-opus-4-6".into(),
+            display_name: "Claude Opus 4.6 (Proxy)".into(),
+            provider: "claude-code-proxy".into(),
+            tier: ModelTier::Frontier,
+            context_window: 200_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "claude-sonnet-4-6".into(),
+            display_name: "Claude Sonnet 4.6 (Proxy)".into(),
+            provider: "claude-code-proxy".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "claude-haiku-4-5-20251001".into(),
+            display_name: "Claude Haiku 4.5 (Proxy)".into(),
+            provider: "claude-code-proxy".into(),
+            tier: ModelTier::Fast,
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec![],
+        },
     ]
 }
 
@@ -2900,7 +2956,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 30);
+        assert_eq!(catalog.list_providers().len(), 31);
     }
 
     #[test]

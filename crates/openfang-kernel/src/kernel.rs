@@ -4711,8 +4711,8 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
             "minimax" | "gemini" | "anthropic" | "openai" | "groq" | "deepseek" | "mistral"
             | "cohere" | "xai" | "ollama" | "together" | "fireworks" | "perplexity"
             | "cerebras" | "sambanova" | "replicate" | "huggingface" | "ai21" | "codex"
-            | "claude-code" | "copilot" | "github-copilot" | "qwen" | "zhipu" | "moonshot"
-            | "openrouter" => {
+            | "claude-code" | "claude-code-proxy" | "copilot" | "github-copilot" | "qwen"
+            | "zhipu" | "moonshot" | "openrouter" => {
                 if model.contains('/') {
                     return Some(prefix.to_string());
                 }

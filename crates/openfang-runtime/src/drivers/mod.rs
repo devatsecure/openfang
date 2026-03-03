@@ -13,12 +13,13 @@ pub mod openai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use openfang_types::model_catalog::{
-    AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, COHERE_BASE_URL, DEEPSEEK_BASE_URL,
-    FIREWORKS_BASE_URL, GEMINI_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, LMSTUDIO_BASE_URL,
-    MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
-    ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CLAUDE_CODE_PROXY_BASE_URL,
+    COHERE_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GROQ_BASE_URL,
+    HUGGINGFACE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL,
+    MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
+    PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
+    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL, ZHIPU_BASE_URL,
+    ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
 
@@ -143,6 +144,11 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
             api_key_env: "",
             key_required: false,
         }),
+        "claude-code-proxy" => Some(ProviderDefaults {
+            base_url: CLAUDE_CODE_PROXY_BASE_URL,
+            api_key_env: "",
+            key_required: false,
+        }),
         "moonshot" | "kimi" => Some(ProviderDefaults {
             base_url: MOONSHOT_BASE_URL,
             api_key_env: "MOONSHOT_API_KEY",
@@ -263,6 +269,21 @@ pub fn create_driver(config: &DriverConfig, client: reqwest::Client) -> Result<A
         return Ok(Arc::new(claude_code::ClaudeCodeDriver::new(cli_path)));
     }
 
+    // Claude Code Proxy — Anthropic Messages API via local Agent SDK proxy
+    if provider == "claude-code-proxy" {
+        let api_key = config
+            .api_key
+            .clone()
+            .unwrap_or_else(|| "not-needed".to_string());
+        let base_url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| CLAUDE_CODE_PROXY_BASE_URL.to_string());
+        return Ok(Arc::new(anthropic::AnthropicDriver::new(
+            api_key, base_url, client,
+        )));
+    }
+
     // GitHub Copilot — wraps OpenAI-compatible driver with automatic token exchange.
     // The CopilotDriver exchanges the GitHub PAT for a Copilot API token on demand,
     // caches it, and refreshes when expired.
@@ -364,6 +385,7 @@ pub fn known_providers() -> &'static [&'static str] {
         "qianfan",
         "codex",
         "claude-code",
+        "claude-code-proxy",
     ]
 }
 
@@ -459,7 +481,8 @@ mod tests {
         assert!(providers.contains(&"qianfan"));
         assert!(providers.contains(&"codex"));
         assert!(providers.contains(&"claude-code"));
-        assert_eq!(providers.len(), 29);
+        assert!(providers.contains(&"claude-code-proxy"));
+        assert_eq!(providers.len(), 30);
     }
 
     #[test]
