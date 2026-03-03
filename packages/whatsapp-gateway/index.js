@@ -556,7 +556,19 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] OpenFang URL: ${OPENFANG_URL}`);
   console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
-  console.log('[gateway] Waiting for POST /login/start to begin QR flow...');
+
+  // Auto-connect if auth_store exists (previous session saved)
+  const authDir = require('node:path').join(__dirname, 'auth_store');
+  const fs = require('node:fs');
+  if (fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0) {
+    console.log('[gateway] Found existing auth session — auto-connecting...');
+    startConnection().catch(err => {
+      console.error('[gateway] Auto-connect failed:', err.message);
+      console.log('[gateway] Waiting for POST /login/start to begin QR flow...');
+    });
+  } else {
+    console.log('[gateway] No saved session. Waiting for POST /login/start to begin QR flow...');
+  }
 });
 
 // Graceful shutdown
