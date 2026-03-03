@@ -128,6 +128,12 @@ async function triggerReconnect() {
 }
 
 // ---------------------------------------------------------------------------
+// Crypto error tracking — detect stale encryption after macOS sleep
+// ---------------------------------------------------------------------------
+let cryptoErrorCount = 0;
+const CRYPTO_ERROR_LIMIT = 3; // Clear auth_store after this many consecutive crypto errors
+
+// ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function startConnection() {
@@ -221,6 +227,34 @@ async function startConnection() {
         statusMessage = `Conflict — retrying in ${backoff / 1000}s`;
         setTimeout(() => startConnection(), backoff);
       } else {
+        // Check for crypto/encryption errors (stale sessions after macOS sleep)
+        const fullError = lastDisconnect?.error?.message || reason;
+        const isCryptoError = /Bad MAC|decrypt|No matching sessions|getAvailablePreKeysOnServer/i.test(fullError);
+
+        if (isCryptoError) {
+          cryptoErrorCount += 1;
+          console.warn(`[gateway] Crypto error #${cryptoErrorCount}/${CRYPTO_ERROR_LIMIT}: ${fullError}`);
+
+          if (cryptoErrorCount >= CRYPTO_ERROR_LIMIT) {
+            console.warn('[gateway] Repeated crypto errors — clearing auth_store for fresh session');
+            cryptoErrorCount = 0;
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const authPath = path.join(__dirname, 'auth_store');
+            if (fs.existsSync(authPath)) {
+              fs.rmSync(authPath, { recursive: true, force: true });
+            }
+            connStatus = 'disconnected';
+            qrDataUrl = '';
+            statusMessage = 'Auth expired — scan QR code again';
+            console.log('[gateway] Auth cleared. Reconnecting for fresh QR...');
+            setTimeout(() => startConnection(), 5000);
+            return;
+          }
+        } else {
+          cryptoErrorCount = 0;
+        }
+
         // All other disconnects (restart required, timeout, unknown) — auto-reconnect
         conflictCount = 0;
         connStatus = 'reconnecting';
@@ -237,6 +271,7 @@ async function startConnection() {
       statusMessage = 'Connected to WhatsApp';
       reconnecting = false;
       conflictCount = 0;
+      cryptoErrorCount = 0;
       console.log('[gateway] Connected to WhatsApp!');
       startHeartbeat();
     }

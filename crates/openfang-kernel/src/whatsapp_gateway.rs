@@ -22,7 +22,10 @@ const GATEWAY_PACKAGE_JSON: &str =
 const DEFAULT_GATEWAY_PORT: u16 = 3009;
 
 /// Maximum restart attempts before giving up.
-const MAX_RESTARTS: u32 = 10;
+const MAX_RESTARTS: u32 = 20;
+
+/// If the gateway ran for this long without crashing, reset the restart counter.
+const RESTART_RESET_WINDOW_SECS: u64 = 300;
 
 /// Restart backoff delays in seconds (wraps at last value).
 const RESTART_DELAYS: [u64; 5] = [5, 10, 20, 30, 60];
@@ -177,6 +180,7 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::OpenFangKernel>)
 
     tokio::spawn(async move {
         let mut restarts = 0u32;
+        let mut last_crash_at = std::time::Instant::now();
 
         loop {
             let node_cmd = if cfg!(windows) { "node.exe" } else { "node" };
@@ -249,6 +253,18 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::OpenFangKernel>)
                     warn!("WhatsApp gateway wait error: {e}");
                 }
             }
+
+            // Reset restart budget if the gateway was stable for long enough
+            let elapsed = last_crash_at.elapsed().as_secs();
+            if elapsed >= RESTART_RESET_WINDOW_SECS && restarts > 0 {
+                info!(
+                    elapsed_secs = elapsed,
+                    old_count = restarts,
+                    "WhatsApp gateway restart counter reset (was stable)"
+                );
+                restarts = 0;
+            }
+            last_crash_at = std::time::Instant::now();
 
             restarts += 1;
             if restarts >= MAX_RESTARTS {
@@ -555,6 +571,7 @@ mod tests {
     #[test]
     fn test_restart_backoff_delays() {
         assert_eq!(RESTART_DELAYS, [5, 10, 20, 30, 60]);
-        assert_eq!(MAX_RESTARTS, 10);
+        assert_eq!(MAX_RESTARTS, 20);
+        assert_eq!(RESTART_RESET_WINDOW_SECS, 300);
     }
 }
