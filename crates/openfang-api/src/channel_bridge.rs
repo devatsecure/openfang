@@ -539,6 +539,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             openfang_types::scheduler::CronAction::SystemEvent { text } => {
                                 text.clone()
                             }
+                            openfang_types::scheduler::CronAction::Workflow {
+                                input, ..
+                            } => input.clone(),
                         };
                         match self.kernel.send_message(j.agent_id, &message).await {
                             Ok(result) => {

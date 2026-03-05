@@ -3595,6 +3595,44 @@ impl OpenFangKernel {
                                     }
                                 }
                             }
+                            openfang_types::scheduler::CronAction::Workflow {
+                                ref workflow_id,
+                                ref input,
+                            } => {
+                                tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
+                                let wf_input = input.clone();
+                                let wf_id = match uuid::Uuid::parse_str(workflow_id) {
+                                    Ok(uid) => WorkflowId(uid),
+                                    Err(_) => {
+                                        tracing::error!(job = %job_name, "Cron: invalid workflow_id");
+                                        kernel.cron_scheduler.record_failure(
+                                            job_id,
+                                            "invalid workflow_id",
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let k = Arc::clone(&kernel);
+                                let delivery = job.delivery.clone();
+                                let jn = job_name.clone();
+                                tokio::spawn(async move {
+                                    match k.run_workflow(wf_id, wf_input).await {
+                                        Ok((_run_id, output)) => {
+                                            tracing::info!(job = %jn, "Cron workflow completed successfully");
+                                            cron_deliver_response(
+                                                &k, agent_id, &output, &delivery,
+                                            )
+                                            .await;
+                                            k.cron_scheduler.record_success(job_id);
+                                        }
+                                        Err(e) => {
+                                            let err_msg = format!("{e}");
+                                            tracing::warn!(job = %jn, error = %err_msg, "Cron workflow failed");
+                                            k.cron_scheduler.record_failure(job_id, &err_msg);
+                                        }
+                                    }
+                                });
+                            }
                         }
                     }
 
