@@ -666,7 +666,7 @@ pub async fn run_workflow(
             tracing::warn!("Workflow run failed for {id}: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Workflow execution failed"})),
+                Json(serde_json::json!({"error": format!("Workflow execution failed: {e}")})),
             )
         }
     }
@@ -716,6 +716,7 @@ pub async fn list_workflow_runs(
                 "steps_completed": r.step_results.len(),
                 "started_at": r.started_at.to_rfc3339(),
                 "completed_at": r.completed_at.map(|t| t.to_rfc3339()),
+                "error": r.error,
             })
         })
         .collect();
