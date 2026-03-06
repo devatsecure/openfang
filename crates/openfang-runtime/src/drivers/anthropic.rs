@@ -174,6 +174,13 @@ impl LlmDriver for AnthropicDriver {
             .map(convert_message)
             .collect();
 
+        if api_messages.is_empty() {
+            return Err(LlmError::Api {
+                status: 400,
+                message: "Cannot send request with empty messages array".to_string(),
+            });
+        }
+
         // Build tools
         let api_tools: Vec<ApiTool> = request
             .tools
@@ -288,6 +295,13 @@ impl LlmDriver for AnthropicDriver {
             .filter(|m| m.role != Role::System)
             .map(convert_message)
             .collect();
+
+        if api_messages.is_empty() {
+            return Err(LlmError::Api {
+                status: 400,
+                message: "Cannot send request with empty messages array".to_string(),
+            });
+        }
 
         let api_tools: Vec<ApiTool> = request
             .tools

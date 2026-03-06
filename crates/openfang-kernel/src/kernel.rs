@@ -1444,6 +1444,255 @@ impl OpenFangKernel {
         }
     }
 
+    /// Send a message to an agent using a fresh ephemeral session.
+    ///
+    /// Unlike `send_message`, this creates a brand-new empty session so the
+    /// agent starts with zero conversation history. Used by workflow steps to
+    /// prevent session bloat from accumulating across runs.
+    pub async fn send_message_ephemeral(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+
+        // Enforce quota before running the agent loop
+        self.scheduler
+            .check_quota(agent_id)
+            .map_err(KernelError::OpenFang)?;
+
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::OpenFang(OpenFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Check metering quota
+        self.metering
+            .check_quota(agent_id, &entry.manifest.resources)
+            .map_err(KernelError::OpenFang)?;
+
+        // Create a fresh ephemeral session — no prior conversation history
+        let ephemeral_session_id = SessionId::new();
+        let mut session = openfang_memory::session::Session {
+            id: ephemeral_session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: Some("workflow-ephemeral".to_string()),
+        };
+
+        let tools = self.available_tools(agent_id);
+        let tools = entry.mode.filter_tools(tools);
+
+        // Apply model routing if configured
+        let mut manifest = entry.manifest.clone();
+
+        // Lazy backfill workspace
+        if manifest.workspace.is_none() {
+            let workspace_dir = self.config.effective_workspaces_dir().join(&manifest.name);
+            if let Err(e) = ensure_workspace(&workspace_dir) {
+                warn!(agent_id = %agent_id, "Failed to backfill workspace: {e}");
+            } else {
+                manifest.workspace = Some(workspace_dir);
+                let _ = self
+                    .registry
+                    .update_workspace(agent_id, manifest.workspace.clone());
+            }
+        }
+
+        // Build structured system prompt
+        {
+            let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
+            let shared_id = shared_memory_agent_id();
+            let user_name = self
+                .memory
+                .structured_get(shared_id, "user_name")
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_str().map(String::from));
+
+            let peer_agents: Vec<(String, String, String)> = self
+                .registry
+                .list()
+                .iter()
+                .map(|a| {
+                    (
+                        a.name.clone(),
+                        format!("{:?}", a.state),
+                        a.manifest.model.model.clone(),
+                    )
+                })
+                .collect();
+
+            let prompt_ctx = openfang_runtime::prompt_builder::PromptContext {
+                agent_name: manifest.name.clone(),
+                agent_description: manifest.description.clone(),
+                base_system_prompt: manifest.model.system_prompt.clone(),
+                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                recalled_memories: vec![],
+                skill_summary: self.build_skill_summary(&manifest.skills),
+                skill_prompt_context: self.collect_prompt_context(&manifest.skills),
+                mcp_summary: if mcp_tool_count > 0 {
+                    self.build_mcp_summary(&manifest.mcp_servers)
+                } else {
+                    String::new()
+                },
+                workspace_path: manifest.workspace.as_ref().map(|p| p.display().to_string()),
+                soul_md: manifest
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| read_identity_file(w, "SOUL.md")),
+                user_md: manifest
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| read_identity_file(w, "USER.md")),
+                memory_md: manifest
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| read_identity_file(w, "MEMORY.md")),
+                canonical_context: self
+                    .memory
+                    .canonical_context(agent_id, None)
+                    .ok()
+                    .and_then(|(s, _)| s),
+                user_name,
+                channel_type: None,
+                is_subagent: manifest
+                    .metadata
+                    .get("is_subagent")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                is_autonomous: manifest.autonomous.is_some(),
+                agents_md: manifest
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| read_identity_file(w, "AGENTS.md")),
+                bootstrap_md: manifest
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| read_identity_file(w, "BOOTSTRAP.md")),
+                workspace_context: manifest.workspace.as_ref().map(|w| {
+                    let mut ws_ctx =
+                        openfang_runtime::workspace_context::WorkspaceContext::detect(w);
+                    ws_ctx.build_context_section()
+                }),
+                identity_md: manifest
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| read_identity_file(w, "IDENTITY.md")),
+                heartbeat_md: if manifest.autonomous.is_some() {
+                    manifest
+                        .workspace
+                        .as_ref()
+                        .and_then(|w| read_identity_file(w, "HEARTBEAT.md"))
+                } else {
+                    None
+                },
+                peer_agents,
+                current_date: Some(chrono::Local::now().format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)").to_string()),
+            };
+            manifest.model.system_prompt =
+                openfang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            if let Some(cc_msg) =
+                openfang_runtime::prompt_builder::build_canonical_context_message(&prompt_ctx)
+            {
+                manifest.metadata.insert(
+                    "canonical_context_msg".to_string(),
+                    serde_json::Value::String(cc_msg),
+                );
+            }
+        }
+
+        let driver = self.resolve_driver(&manifest)?;
+
+        let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.context_window as usize)
+        });
+
+        let mut skill_snapshot = self
+            .skill_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot();
+
+        if let Some(ref workspace) = manifest.workspace {
+            let ws_skills = workspace.join("skills");
+            if ws_skills.exists() {
+                if let Err(e) = skill_snapshot.load_workspace_skills(&ws_skills) {
+                    warn!(agent_id = %agent_id, "Failed to load workspace skills: {e}");
+                }
+            }
+        }
+
+        let message_with_links = if let Some(link_ctx) =
+            openfang_runtime::link_understanding::build_link_context(message, &self.config.links)
+        {
+            format!("{message}{link_ctx}")
+        } else {
+            message.to_string()
+        };
+
+        info!(
+            agent = %entry.name,
+            agent_id = %agent_id,
+            session_id = %ephemeral_session_id,
+            "Workflow ephemeral session — fresh context, zero prior messages"
+        );
+
+        let result = run_agent_loop(
+            &manifest,
+            &message_with_links,
+            &mut session,
+            &self.memory,
+            driver,
+            &tools,
+            handle,
+            Some(&skill_snapshot),
+            Some(&self.mcp_connections),
+            Some(&self.web_ctx),
+            Some(&self.browser_ctx),
+            self.embedding_driver.as_deref(),
+            manifest.workspace.as_deref(),
+            None,
+            Some(&self.media_engine),
+            if self.config.tts.enabled {
+                Some(&self.tts_engine)
+            } else {
+                None
+            },
+            if self.config.docker.enabled {
+                Some(&self.config.docker)
+            } else {
+                None
+            },
+            Some(&self.hooks),
+            ctx_window,
+            Some(&self.process_manager),
+        )
+        .await
+        .map_err(KernelError::OpenFang)?;
+
+        // Record token usage for quota tracking
+        self.scheduler.record_usage(agent_id, &result.total_usage);
+
+        // Audit trail
+        self.audit_log.record(
+            agent_id.to_string(),
+            openfang_runtime::audit::AuditAction::AgentMessage,
+            format!(
+                "workflow_ephemeral tokens_in={}, tokens_out={}",
+                result.total_usage.input_tokens, result.total_usage.output_tokens
+            ),
+            "ok",
+        );
+
+        Ok(result)
+    }
+
     /// Send a message to an agent with streaming responses.
     ///
     /// Returns a receiver for incremental `StreamEvent`s and a `JoinHandle`
@@ -3307,9 +3556,10 @@ impl OpenFangKernel {
             }
         };
 
-        // Message sender: sends to agent and returns (output, in_tokens, out_tokens)
+        // Message sender: uses ephemeral sessions so each workflow step starts
+        // with a clean conversation context (prevents session bloat across runs).
         let send_message = |agent_id: AgentId, message: String| async move {
-            self.send_message(agent_id, &message)
+            self.send_message_ephemeral(agent_id, &message)
                 .await
                 .map(|r| {
                     (
