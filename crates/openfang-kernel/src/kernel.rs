@@ -551,10 +551,14 @@ impl OpenFangKernel {
             default: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .pool_max_idle_per_host(20)
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .tcp_keepalive(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to build default HTTP client"),
             streaming: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(0))
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .tcp_keepalive(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to build streaming HTTP client"),
         };
