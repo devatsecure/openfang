@@ -445,6 +445,9 @@ impl WorkflowEngine {
     }
 
     /// Execute a single step with error mode handling. Returns (output, input_tokens, output_tokens).
+    ///
+    /// On timeout the underlying agent task is **aborted** so side-effects
+    /// (e.g. posting a tweet) cannot fire after the deadline.
     async fn execute_step_with_error_mode<F, Fut>(
         step: &WorkflowStep,
         agent_id: AgentId,
@@ -453,33 +456,49 @@ impl WorkflowEngine {
     ) -> Result<Option<(String, u64, u64)>, String>
     where
         F: Fn(AgentId, String) -> Fut,
-        Fut: std::future::Future<Output = Result<(String, u64, u64), String>>,
+        Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send + 'static,
     {
         let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
 
         match &step.error_mode {
             ErrorMode::Fail => {
-                let result = tokio::time::timeout(timeout_dur, send_message(agent_id, prompt))
-                    .await
-                    .map_err(|_| {
-                        format!(
+                let handle = tokio::spawn(send_message(agent_id, prompt));
+                let abort = handle.abort_handle();
+                match tokio::time::timeout(timeout_dur, handle).await {
+                    Ok(Ok(Ok(result))) => Ok(Some(result)),
+                    Ok(Ok(Err(e))) => Err(format!("Step '{}' failed: {}", step.name, e)),
+                    Ok(Err(e)) => Err(format!("Step '{}' panicked: {}", step.name, e)),
+                    Err(_) => {
+                        abort.abort();
+                        warn!(
+                            step = %step.name,
+                            timeout_secs = step.timeout_secs,
+                            "Step timed out — agent task aborted to prevent side-effects"
+                        );
+                        Err(format!(
                             "Step '{}' timed out after {}s",
                             step.name, step.timeout_secs
-                        )
-                    })?
-                    .map_err(|e| format!("Step '{}' failed: {}", step.name, e))?;
-                Ok(Some(result))
+                        ))
+                    }
+                }
             }
             ErrorMode::Skip => {
-                match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt)).await {
-                    Ok(Ok(result)) => Ok(Some(result)),
-                    Ok(Err(e)) => {
+                let handle = tokio::spawn(send_message(agent_id, prompt));
+                let abort = handle.abort_handle();
+                match tokio::time::timeout(timeout_dur, handle).await {
+                    Ok(Ok(Ok(result))) => Ok(Some(result)),
+                    Ok(Ok(Err(e))) => {
                         warn!("Step '{}' failed (skipping): {e}", step.name);
                         Ok(None)
                     }
+                    Ok(Err(e)) => {
+                        warn!("Step '{}' panicked (skipping): {e}", step.name);
+                        Ok(None)
+                    }
                     Err(_) => {
+                        abort.abort();
                         warn!(
-                            "Step '{}' timed out (skipping) after {}s",
+                            "Step '{}' timed out (skipping) after {}s — agent task aborted",
                             step.name, step.timeout_secs
                         );
                         Ok(None)
@@ -489,11 +508,12 @@ impl WorkflowEngine {
             ErrorMode::Retry { max_retries } => {
                 let mut last_err = String::new();
                 for attempt in 0..=*max_retries {
-                    match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt.clone()))
-                        .await
-                    {
-                        Ok(Ok(result)) => return Ok(Some(result)),
-                        Ok(Err(e)) => {
+                    let handle =
+                        tokio::spawn(send_message(agent_id, prompt.clone()));
+                    let abort = handle.abort_handle();
+                    match tokio::time::timeout(timeout_dur, handle).await {
+                        Ok(Ok(Ok(result))) => return Ok(Some(result)),
+                        Ok(Ok(Err(e))) => {
                             last_err = e.to_string();
                             if attempt < *max_retries {
                                 warn!(
@@ -503,7 +523,11 @@ impl WorkflowEngine {
                                 );
                             }
                         }
+                        Ok(Err(e)) => {
+                            last_err = format!("panicked: {e}");
+                        }
                         Err(_) => {
+                            abort.abort();
                             last_err = format!("timed out after {}s", step.timeout_secs);
                             if attempt < *max_retries {
                                 warn!(
@@ -535,7 +559,7 @@ impl WorkflowEngine {
     ) -> Result<String, String>
     where
         F: Fn(AgentId, String) -> Fut,
-        Fut: std::future::Future<Output = Result<(String, u64, u64), String>>,
+        Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send + 'static,
     {
         // Get the run and workflow
         let (workflow, input) = {

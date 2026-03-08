@@ -3716,7 +3716,7 @@ impl OpenFangKernel {
 
     /// Run a workflow pipeline end-to-end.
     pub async fn run_workflow(
-        &self,
+        self: &Arc<Self>,
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<(WorkflowRunId, String)> {
@@ -3747,17 +3747,22 @@ impl OpenFangKernel {
 
         // Message sender: uses ephemeral sessions so each workflow step starts
         // with a clean conversation context (prevents session bloat across runs).
-        let send_message = |agent_id: AgentId, message: String| async move {
-            self.send_message_ephemeral(agent_id, &message)
-                .await
-                .map(|r| {
-                    (
-                        r.response,
-                        r.total_usage.input_tokens,
-                        r.total_usage.output_tokens,
-                    )
-                })
-                .map_err(|e| format!("{e}"))
+        // Clone the Arc so the closure is 'static (required for tokio::spawn cancellation).
+        let kernel = Arc::clone(self);
+        let send_message = move |agent_id: AgentId, message: String| {
+            let k = Arc::clone(&kernel);
+            async move {
+                k.send_message_ephemeral(agent_id, &message)
+                    .await
+                    .map(|r| {
+                        (
+                            r.response,
+                            r.total_usage.input_tokens,
+                            r.total_usage.output_tokens,
+                        )
+                    })
+                    .map_err(|e| format!("{e}"))
+            }
         };
 
         // SECURITY: Global workflow timeout to prevent runaway execution.
