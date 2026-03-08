@@ -3707,7 +3707,9 @@ impl OpenFangKernel {
             .create_run(workflow_id, input)
             .await
             .ok_or_else(|| {
-                KernelError::OpenFang(OpenFangError::Internal("Workflow not found".to_string()))
+                KernelError::OpenFang(OpenFangError::Internal(
+                    "Workflow not found or already has an active run".to_string(),
+                ))
             })?;
 
         // Agent resolver: looks up by name or ID in the registry

@@ -336,12 +336,35 @@ impl WorkflowEngine {
     ///
     /// The actual execution is driven externally by calling `execute_run()`
     /// with the kernel handle, since the workflow engine doesn't own the kernel.
+    ///
+    /// Returns `None` if the workflow doesn't exist, or if a run for this
+    /// workflow is already pending/running (deduplication guard).
     pub async fn create_run(
         &self,
         workflow_id: WorkflowId,
         input: String,
     ) -> Option<WorkflowRunId> {
         let workflow = self.workflows.read().await.get(&workflow_id)?.clone();
+
+        // Deduplication guard: reject if a run for this workflow is already active
+        {
+            let runs = self.runs.read().await;
+            let already_active = runs.values().any(|r| {
+                r.workflow_id == workflow_id
+                    && matches!(
+                        r.state,
+                        WorkflowRunState::Pending | WorkflowRunState::Running
+                    )
+            });
+            if already_active {
+                warn!(
+                    workflow = %workflow.name,
+                    "Workflow run rejected: already has an active run"
+                );
+                return None;
+            }
+        }
+
         let run_id = WorkflowRunId::new();
 
         let run = WorkflowRun {
