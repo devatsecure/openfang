@@ -1386,10 +1386,45 @@ pub struct MemoryConfig {
     /// How often to run memory consolidation (hours). 0 = disabled.
     #[serde(default = "default_consolidation_interval")]
     pub consolidation_interval_hours: u64,
+    /// Enable hybrid search (vector + FTS5 full-text). Default: true.
+    #[serde(default = "default_true")]
+    pub hybrid_search: bool,
+    /// Temporal decay half-life in days (0 = disabled). Default: 30.
+    #[serde(default = "default_temporal_decay_days")]
+    pub temporal_decay_days: u32,
+    /// MMR diversity lambda (0 = max diversity, 1 = max relevance). Default: 0.7.
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f32,
+    /// Weight for vector results in Reciprocal Rank Fusion. Default: 0.6.
+    #[serde(default = "default_vector_weight")]
+    pub vector_weight: f32,
+    /// Weight for FTS5 text results in Reciprocal Rank Fusion. Default: 0.4.
+    #[serde(default = "default_text_weight")]
+    pub text_weight: f32,
 }
 
 fn default_consolidation_interval() -> u64 {
     24
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_temporal_decay_days() -> u32 {
+    30
+}
+
+fn default_mmr_lambda() -> f32 {
+    0.7
+}
+
+fn default_vector_weight() -> f32 {
+    0.6
+}
+
+fn default_text_weight() -> f32 {
+    0.4
 }
 
 impl Default for MemoryConfig {
@@ -1402,6 +1437,11 @@ impl Default for MemoryConfig {
             embedding_provider: None,
             embedding_api_key_env: None,
             consolidation_interval_hours: default_consolidation_interval(),
+            hybrid_search: default_true(),
+            temporal_decay_days: default_temporal_decay_days(),
+            mmr_lambda: default_mmr_lambda(),
+            vector_weight: default_vector_weight(),
+            text_weight: default_text_weight(),
         }
     }
 }

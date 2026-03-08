@@ -13,6 +13,7 @@ pub mod command_lane;
 pub mod compactor;
 pub mod copilot_oauth;
 pub mod context_budget;
+pub mod context_engine;
 pub mod context_overflow;
 pub mod docker_sandbox;
 pub mod drivers;

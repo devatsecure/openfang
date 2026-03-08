@@ -320,6 +320,9 @@ pub async fn execute_tool(
         "hand_status" => tool_hand_status(input, kernel).await,
         "hand_deactivate" => tool_hand_deactivate(input, kernel).await,
 
+        // LLM Task — lightweight stateless LLM call for structured extraction
+        "llm_task" => tool_llm_task(input, kernel).await,
+
         // A2A outbound tools (cross-instance agent communication)
         "a2a_discover" => tool_a2a_discover(input).await,
         "a2a_send" => tool_a2a_send(input, kernel).await,
@@ -1055,6 +1058,21 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "instance_id": { "type": "string", "description": "The UUID of the hand instance to deactivate" }
                 },
                 "required": ["instance_id"]
+            }),
+        },
+        // --- LLM Task tool ---
+        ToolDefinition {
+            name: "llm_task".to_string(),
+            description: "Run a lightweight, stateless LLM call for structured extraction, classification, or summarization. No tools, no memory, no session — just prompt in, text/JSON out. Ideal for workflow steps that don't need full agent capabilities.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The instruction for the LLM (e.g., 'Extract 3 tweet-worthy insights from this research')" },
+                    "input": { "type": "string", "description": "The text/data to process" },
+                    "output_format": { "type": "string", "enum": ["text", "json"], "description": "Expected output format (default: text). When 'json', the model is instructed to return valid JSON only." },
+                    "max_tokens": { "type": "integer", "description": "Maximum tokens in the response (default: 1024)" }
+                },
+                "required": ["prompt"]
             }),
         },
         // --- A2A outbound tools ---
@@ -2305,6 +2323,102 @@ async fn tool_hand_deactivate(
         .ok_or("Missing 'instance_id' parameter")?;
     kh.hand_deactivate(instance_id).await?;
     Ok(format!("Hand instance '{}' deactivated.", instance_id))
+}
+
+// ---------------------------------------------------------------------------
+// LLM Task — lightweight stateless LLM call
+// ---------------------------------------------------------------------------
+
+/// Run a stateless LLM call with no tools, memory, or session.
+/// Ideal for structured extraction, classification, or summarization in workflows.
+async fn tool_llm_task(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let _ = kernel; // reserved for future per-agent model override
+
+    let prompt = input["prompt"]
+        .as_str()
+        .ok_or("Missing required 'prompt' parameter")?;
+    let user_input = input["input"].as_str().unwrap_or("");
+    let output_format = input["output_format"].as_str().unwrap_or("text");
+    let max_tokens = input["max_tokens"].as_u64().unwrap_or(1024) as u32;
+
+    // Build system prompt with optional JSON instruction
+    let system = if output_format == "json" {
+        format!(
+            "{}\n\nIMPORTANT: You MUST respond with valid JSON only. No markdown fences, no explanation — just the JSON.",
+            prompt
+        )
+    } else {
+        prompt.to_string()
+    };
+
+    // Build user message: the input data to process
+    let user_message = if user_input.is_empty() {
+        // No input — prompt-only mode (e.g., "Generate a haiku about Rust")
+        "(No input provided — follow the system prompt instruction.)".to_string()
+    } else {
+        user_input.to_string()
+    };
+
+    // Auto-detect available provider and create a transient driver
+    let (provider, model, env_var) = crate::drivers::detect_available_provider()
+        .ok_or("No LLM provider configured. Set an API key environment variable (e.g., GROQ_API_KEY, OPENAI_API_KEY).")?;
+
+    let driver_config = crate::llm_driver::DriverConfig {
+        provider: provider.to_string(),
+        api_key: std::env::var(env_var).ok(),
+        base_url: None,
+    };
+    let driver = crate::drivers::create_driver(&driver_config)
+        .map_err(|e| format!("Failed to create LLM driver: {e}"))?;
+
+    // Build a single completion request — no tools, no history
+    let request = crate::llm_driver::CompletionRequest {
+        model: model.to_string(),
+        messages: vec![openfang_types::message::Message {
+            role: openfang_types::message::Role::User,
+            content: openfang_types::message::MessageContent::Text(user_message),
+        }],
+        tools: vec![],
+        max_tokens,
+        temperature: 0.3,
+        system: Some(system),
+        thinking: None,
+    };
+
+    let response = driver
+        .complete(request)
+        .await
+        .map_err(|e| format!("LLM call failed: {e}"))?;
+
+    let text = response.text();
+    if text.is_empty() {
+        return Err("LLM returned empty response".to_string());
+    }
+
+    // For JSON format, validate that the output parses as JSON
+    if output_format == "json" {
+        // Strip markdown fences if the model included them despite instructions
+        let cleaned = text
+            .trim()
+            .strip_prefix("```json")
+            .or_else(|| text.trim().strip_prefix("```"))
+            .unwrap_or(text.trim());
+        let cleaned = cleaned
+            .strip_suffix("```")
+            .unwrap_or(cleaned)
+            .trim();
+        if serde_json::from_str::<serde_json::Value>(cleaned).is_err() {
+            // Return as-is but warn — don't fail hard since the model tried
+            debug!("llm_task: JSON validation failed, returning raw text");
+            return Ok(cleaned.to_string());
+        }
+        return Ok(cleaned.to_string());
+    }
+
+    Ok(text)
 }
 
 // ---------------------------------------------------------------------------

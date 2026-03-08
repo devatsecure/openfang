@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -41,6 +41,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 8 {
         migrate_v8(conn)?;
+    }
+
+    if current_version < 9 {
+        migrate_v9(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -327,6 +331,45 @@ fn migrate_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         INSERT OR IGNORE INTO migrations (version, applied_at, description)
         VALUES (8, datetime('now'), 'Add goals table for hierarchical goal tracking');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 9: Add FTS5 virtual table for full-text search on memories.
+fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        -- FTS5 virtual table mirroring memories.content for full-text search.
+        -- Uses the 'porter' tokenizer for English stemming.
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            content,
+            content='memories',
+            content_rowid='rowid',
+            tokenize='porter'
+        );
+
+        -- Populate FTS index from existing memories
+        INSERT OR IGNORE INTO memories_fts(rowid, content)
+            SELECT rowid, content FROM memories WHERE deleted = 0;
+
+        -- Triggers to keep FTS in sync with the memories table
+        CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER UPDATE OF deleted ON memories
+        WHEN new.deleted = 1 BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE OF content ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+            INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (9, datetime('now'), 'Add FTS5 full-text search on memories');
         ",
     )?;
     Ok(())
