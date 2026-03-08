@@ -385,6 +385,38 @@ impl MemorySubstrate {
         .map_err(|e| OpenFangError::Internal(e.to_string()))?
     }
 
+    /// Async wrapper for `hybrid_recall` — runs in a blocking thread.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hybrid_recall_async(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: Option<MemoryFilter>,
+        query_embedding: Option<&[f32]>,
+        vector_weight: f32,
+        text_weight: f32,
+        temporal_decay_days: u32,
+        mmr_lambda: f32,
+    ) -> OpenFangResult<Vec<MemoryFragment>> {
+        let store = self.semantic.clone();
+        let query = query.to_string();
+        let embedding_owned = query_embedding.map(|e| e.to_vec());
+        tokio::task::spawn_blocking(move || {
+            store.hybrid_recall(
+                &query,
+                limit,
+                filter,
+                embedding_owned.as_deref(),
+                vector_weight,
+                text_weight,
+                temporal_decay_days,
+                mmr_lambda,
+            )
+        })
+        .await
+        .map_err(|e| OpenFangError::Internal(e.to_string()))?
+    }
+
     /// Async wrapper for `remember_with_embedding` — runs in a blocking thread.
     pub async fn remember_with_embedding_async(
         &self,

@@ -122,6 +122,101 @@ impl ContextEngine for DefaultContextEngine {
     }
 }
 
+/// Hybrid context engine — uses FTS5 full-text + vector + temporal decay + MMR diversity.
+///
+/// Falls back gracefully when embeddings aren't available (e.g. WhatsApp assistant
+/// without a local embedding model). In that case, FTS5 still provides much better
+/// recall than the basic LIKE text search used by `DefaultContextEngine`.
+pub struct HybridContextEngine {
+    pub vector_weight: f32,
+    pub text_weight: f32,
+    pub temporal_decay_days: u32,
+    pub mmr_lambda: f32,
+}
+
+impl HybridContextEngine {
+    pub fn from_config(config: &openfang_types::config::MemoryConfig) -> Self {
+        Self {
+            vector_weight: config.vector_weight,
+            text_weight: config.text_weight,
+            temporal_decay_days: config.temporal_decay_days,
+            mmr_lambda: config.mmr_lambda,
+        }
+    }
+}
+
+#[async_trait]
+impl ContextEngine for HybridContextEngine {
+    async fn assemble(
+        &self,
+        agent_id: openfang_types::agent::AgentId,
+        query: &str,
+        manifest: &AgentManifest,
+        memory: &MemorySubstrate,
+        embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+        messages: &[Message],
+    ) -> Result<AssembledContext, String> {
+        // Get embedding vector if driver is available (may fail gracefully)
+        let query_vec = if let Some(emb) = embedding_driver {
+            match emb.embed_one(query).await {
+                Ok(v) => {
+                    debug!("HybridContextEngine: vector recall (dims={})", v.len());
+                    Some(v)
+                }
+                Err(e) => {
+                    warn!("HybridContextEngine: embedding failed, FTS5-only mode: {e}");
+                    None
+                }
+            }
+        } else {
+            debug!("HybridContextEngine: no embedding driver, FTS5-only mode");
+            None
+        };
+
+        let filter = Some(MemoryFilter {
+            agent_id: Some(agent_id),
+            ..Default::default()
+        });
+
+        let memories = memory
+            .hybrid_recall_async(
+                query,
+                5,
+                filter,
+                query_vec.as_deref(),
+                self.vector_weight,
+                self.text_weight,
+                self.temporal_decay_days,
+                self.mmr_lambda,
+            )
+            .await
+            .unwrap_or_default();
+
+        // Build system prompt with recalled memories
+        let mut system_prompt = manifest.model.system_prompt.clone();
+        if !memories.is_empty() {
+            debug!(
+                "HybridContextEngine: recalled {} memories for agent {}",
+                memories.len(),
+                manifest.name
+            );
+            let mem_pairs: Vec<(String, String)> = memories
+                .iter()
+                .map(|m| (String::new(), m.content.clone()))
+                .collect();
+            system_prompt.push_str("\n\n");
+            system_prompt
+                .push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
+        }
+
+        Ok(AssembledContext {
+            system_prompt,
+            messages: messages.to_vec(),
+            recalled_memories: memories,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

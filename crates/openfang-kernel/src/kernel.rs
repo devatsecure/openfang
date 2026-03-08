@@ -1773,6 +1773,14 @@ impl OpenFangKernel {
             "Workflow ephemeral session — fresh context, zero prior messages"
         );
 
+        let hybrid_engine = if self.config.memory.hybrid_search {
+            Some(openfang_runtime::context_engine::HybridContextEngine::from_config(&self.config.memory))
+        } else {
+            None
+        };
+        let context_engine: Option<&(dyn openfang_runtime::context_engine::ContextEngine + Send + Sync)> =
+            hybrid_engine.as_ref().map(|e| e as _);
+
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -1802,6 +1810,7 @@ impl OpenFangKernel {
             Some(&self.hooks),
             ctx_window,
             Some(&self.process_manager),
+            context_engine,
         )
         .await
         .map_err(KernelError::OpenFang)?;
@@ -2620,6 +2629,14 @@ impl OpenFangKernel {
             message.to_string()
         };
 
+        let hybrid_engine = if self.config.memory.hybrid_search {
+            Some(openfang_runtime::context_engine::HybridContextEngine::from_config(&self.config.memory))
+        } else {
+            None
+        };
+        let context_engine: Option<&(dyn openfang_runtime::context_engine::ContextEngine + Send + Sync)> =
+            hybrid_engine.as_ref().map(|e| e as _);
+
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -2649,6 +2666,7 @@ impl OpenFangKernel {
             Some(&self.hooks),
             ctx_window,
             Some(&self.process_manager),
+            context_engine,
         )
         .await
         .map_err(KernelError::OpenFang)?;

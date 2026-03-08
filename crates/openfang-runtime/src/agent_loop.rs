@@ -132,6 +132,72 @@ pub struct AgentLoopResult {
     pub directives: openfang_types::message::ReplyDirectives,
 }
 
+/// Inline memory recall + prompt assembly (fallback when no context engine is provided).
+async fn assemble_context_inline(
+    agent_id: openfang_types::agent::AgentId,
+    user_message: &str,
+    manifest: &AgentManifest,
+    memory: &MemorySubstrate,
+    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+) -> (String, Vec<openfang_types::memory::MemoryFragment>) {
+    let memories = if let Some(emb) = embedding_driver {
+        match emb.embed_one(user_message).await {
+            Ok(query_vec) => {
+                debug!("Using vector recall (dims={})", query_vec.len());
+                memory
+                    .recall_with_embedding_async(
+                        user_message,
+                        5,
+                        Some(MemoryFilter {
+                            agent_id: Some(agent_id),
+                            ..Default::default()
+                        }),
+                        Some(&query_vec),
+                    )
+                    .await
+                    .unwrap_or_default()
+            }
+            Err(e) => {
+                warn!("Embedding recall failed, falling back to text search: {e}");
+                memory
+                    .recall(
+                        user_message,
+                        5,
+                        Some(MemoryFilter {
+                            agent_id: Some(agent_id),
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .unwrap_or_default()
+            }
+        }
+    } else {
+        memory
+            .recall(
+                user_message,
+                5,
+                Some(MemoryFilter {
+                    agent_id: Some(agent_id),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap_or_default()
+    };
+
+    let mut system_prompt = manifest.model.system_prompt.clone();
+    if !memories.is_empty() {
+        let mem_pairs: Vec<(String, String)> = memories
+            .iter()
+            .map(|m| (String::new(), m.content.clone()))
+            .collect();
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
+    }
+    (system_prompt, memories)
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of OpenFang: it loads session context, recalls memories,
@@ -158,6 +224,7 @@ pub async fn run_agent_loop(
     hooks: Option<&crate::hooks::HookRegistry>,
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
+    context_engine: Option<&(dyn crate::context_engine::ContextEngine + Send + Sync)>,
 ) -> OpenFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -168,51 +235,27 @@ pub async fn run_agent_loop(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
-    // Recall relevant memories — prefer vector similarity search when embedding driver is available
-    let memories = if let Some(emb) = embedding_driver {
-        match emb.embed_one(user_message).await {
-            Ok(query_vec) => {
-                debug!("Using vector recall (dims={})", query_vec.len());
-                memory
-                    .recall_with_embedding_async(
-                        user_message,
-                        5,
-                        Some(MemoryFilter {
-                            agent_id: Some(session.agent_id),
-                            ..Default::default()
-                        }),
-                        Some(&query_vec),
-                    )
-                    .await
-                    .unwrap_or_default()
-            }
+    // Recall memories and build system prompt — delegate to context engine if available
+    let (system_prompt, _memories) = if let Some(engine) = context_engine {
+        match engine
+            .assemble(
+                session.agent_id,
+                user_message,
+                manifest,
+                memory,
+                embedding_driver,
+                &session.messages,
+            )
+            .await
+        {
+            Ok(ctx) => (ctx.system_prompt, ctx.recalled_memories),
             Err(e) => {
-                warn!("Embedding recall failed, falling back to text search: {e}");
-                memory
-                    .recall(
-                        user_message,
-                        5,
-                        Some(MemoryFilter {
-                            agent_id: Some(session.agent_id),
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                    .unwrap_or_default()
+                warn!("Context engine failed, falling back to inline recall: {e}");
+                assemble_context_inline(session.agent_id, user_message, manifest, memory, embedding_driver).await
             }
         }
     } else {
-        memory
-            .recall(
-                user_message,
-                5,
-                Some(MemoryFilter {
-                    agent_id: Some(session.agent_id),
-                    ..Default::default()
-                }),
-            )
-            .await
-            .unwrap_or_default()
+        assemble_context_inline(session.agent_id, user_message, manifest, memory, embedding_driver).await
     };
 
     // Fire BeforePromptBuild hook
@@ -223,23 +266,11 @@ pub async fn run_agent_loop(
             agent_id: agent_id_str.as_str(),
             event: openfang_types::agent::HookEvent::BeforePromptBuild,
             data: serde_json::json!({
-                "system_prompt": &manifest.model.system_prompt,
+                "system_prompt": &system_prompt,
                 "user_message": user_message,
             }),
         };
         let _ = hook_reg.fire(&ctx);
-    }
-
-    // Build the system prompt — base prompt comes from kernel (prompt_builder),
-    // we append recalled memories here since they are resolved at loop time.
-    let mut system_prompt = manifest.model.system_prompt.clone();
-    if !memories.is_empty() {
-        let mem_pairs: Vec<(String, String)> = memories
-            .iter()
-            .map(|m| (String::new(), m.content.clone()))
-            .collect();
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
     }
 
     // Add the user message to session history
@@ -2211,6 +2242,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // context_engine
         )
         .await
         .expect("Loop should complete without error");
@@ -2263,6 +2295,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // context_engine
         )
         .await
         .expect("Loop should complete without error");
@@ -2315,6 +2348,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // context_engine
         )
         .await
         .expect("Loop should complete without error");
@@ -2482,6 +2516,7 @@ mod tests {
             None,
             None, // context_window_tokens
             None, // process_manager
+            None, // context_engine
         )
         .await
         .expect("Loop should recover via retry");
@@ -2528,6 +2563,7 @@ mod tests {
             None,
             None, // context_window_tokens
             None, // process_manager
+            None, // context_engine
         )
         .await
         .expect("Loop should complete with fallback");
@@ -3032,6 +3068,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // context_engine
         )
         .await
         .expect("Agent loop should complete");
@@ -3098,6 +3135,7 @@ mod tests {
             None,
             None,
             None,
+            None, // context_engine
         )
         .await
         .expect("Normal loop should complete");
