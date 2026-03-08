@@ -295,6 +295,20 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         return Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url)));
     }
 
+    // Claude Code Proxy — local proxy exposing Anthropic Messages API
+    if provider == "claude-code-proxy" {
+        let api_key = config
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+            .unwrap_or_default();
+        let base_url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| CLAUDE_CODE_PROXY_BASE_URL.to_string());
+        return Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url)));
+    }
+
     // Claude Code CLI — subprocess-based, no API key needed
     if provider == "claude-code" {
         let cli_path = config.base_url.clone();
