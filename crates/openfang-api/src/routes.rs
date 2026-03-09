@@ -5235,6 +5235,23 @@ pub async fn patch_agent(
             );
         }
     }
+    // Provider override — apply AFTER model so it can correct auto-inferred provider
+    if let Some(provider) = body.get("provider").and_then(|v| v.as_str()) {
+        if let Err(e) = state
+            .kernel
+            .registry
+            .update_provider(agent_id, provider.to_string())
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("{e}")})),
+            );
+        }
+        // Re-persist after provider override
+        if let Some(entry) = state.kernel.registry.get(agent_id) {
+            let _ = state.kernel.memory.save_agent(&entry);
+        }
+    }
     if let Some(system_prompt) = body.get("system_prompt").and_then(|v| v.as_str()) {
         if let Err(e) = state
             .kernel

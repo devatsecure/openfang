@@ -208,7 +208,7 @@ impl LlmDriver for AnthropicDriver {
         };
 
         // Retry loop for rate limits and overloads
-        let max_retries = 3;
+        let max_retries = 5;
         for attempt in 0..=max_retries {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic API request");
@@ -329,7 +329,7 @@ impl LlmDriver for AnthropicDriver {
         };
 
         // Retry loop for the initial HTTP request
-        let max_retries = 3;
+        let max_retries = 5;
         for attempt in 0..=max_retries {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic streaming request");

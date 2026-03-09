@@ -35,10 +35,10 @@ use tracing::{debug, info, warn};
 const MAX_ITERATIONS: u32 = 50;
 
 /// Maximum retries for rate-limited or overloaded API calls.
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = 5;
 
 /// Base delay for exponential backoff (milliseconds).
-const BASE_RETRY_DELAY_MS: u64 = 1000;
+const BASE_RETRY_DELAY_MS: u64 = 2000;
 
 /// Timeout for individual tool executions (seconds).
 /// Raised from 60s to 120s for browser automation and long-running builds.

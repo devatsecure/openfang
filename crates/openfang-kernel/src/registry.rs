@@ -236,6 +236,17 @@ impl AgentRegistry {
     }
 
     /// Update an agent's system prompt (hot-swap, takes effect on next message).
+    /// Update an agent's LLM provider (e.g. "claude-code-proxy", "openai").
+    pub fn update_provider(&self, id: AgentId, provider: String) -> OpenFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| OpenFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.model.provider = provider;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     pub fn update_system_prompt(&self, id: AgentId, new_prompt: String) -> OpenFangResult<()> {
         let mut entry = self
             .agents
