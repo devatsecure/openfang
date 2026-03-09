@@ -839,9 +839,10 @@ pub async fn delete_workflow(
 /// GET /api/workflows/:id/runs — List runs for a workflow.
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let runs = state.kernel.workflows.list_runs(None).await;
+    let workflow_id = id.parse().ok();
+    let runs = state.kernel.workflows.list_runs(workflow_id, None).await;
     let list: Vec<serde_json::Value> = runs
         .iter()
         .map(|r| {
@@ -5239,6 +5240,22 @@ pub async fn patch_agent(
             .kernel
             .registry
             .update_system_prompt(agent_id, system_prompt.to_string())
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("{e}")})),
+            );
+        }
+    }
+    if let Some(skills) = body.get("skills").and_then(|v| v.as_array()) {
+        let skill_names: Vec<String> = skills
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        if let Err(e) = state
+            .kernel
+            .registry
+            .update_skills(agent_id, skill_names)
         {
             return (
                 StatusCode::BAD_REQUEST,

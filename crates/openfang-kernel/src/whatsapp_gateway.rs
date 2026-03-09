@@ -174,6 +174,14 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::OpenFangKernel>)
     std::env::set_var("WHATSAPP_WEB_GATEWAY_URL", format!("http://127.0.0.1:{port}"));
     info!("WHATSAPP_WEB_GATEWAY_URL set to http://127.0.0.1:{port}");
 
+    // If the port is already bound (e.g. managed by launchd), skip spawning
+    if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        info!(
+            "WhatsApp gateway already running on port {port} (external process manager), skipping spawn"
+        );
+        return;
+    }
+
     // Spawn with crash monitoring
     let kernel_weak = Arc::downgrade(kernel);
     let gateway_pid = Arc::clone(&kernel.whatsapp_gateway_pid);

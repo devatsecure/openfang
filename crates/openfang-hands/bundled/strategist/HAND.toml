@@ -4,6 +4,7 @@ description = "Autonomous content strategist — editorial calendars, competitiv
 category = "content"
 icon = "\U0001F4DD"
 tools = ["shell_exec", "web_search", "web_fetch", "file_read", "file_write", "file_list", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
+skills = ["twitter-writer", "writing-coach"]
 
 # ─── Configurable settings ───────────────────────────────────────────────────
 

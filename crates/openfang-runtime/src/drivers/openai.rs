@@ -25,7 +25,12 @@ impl OpenAIDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .tcp_keepalive(std::time::Duration::from_secs(30))
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .timeout(std::time::Duration::from_secs(600))
+                .build()
+                .expect("Failed to build OpenAI HTTP client"),
             extra_headers: Vec::new(),
         }
     }

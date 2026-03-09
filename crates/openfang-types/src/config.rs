@@ -1065,6 +1065,11 @@ pub struct KernelConfig {
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
+    /// Custom system prompt for the default assistant agent.
+    /// When set, this prompt is applied on every boot — both for fresh installs
+    /// and when restoring the assistant from the database.
+    #[serde(default)]
+    pub assistant_system_prompt: String,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1232,6 +1237,7 @@ impl Default for KernelConfig {
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
             oauth: OAuthConfig::default(),
+            assistant_system_prompt: String::new(),
         }
     }
 }

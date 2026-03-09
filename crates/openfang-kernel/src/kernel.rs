@@ -1129,6 +1129,13 @@ impl OpenFangKernel {
                             || restored_entry.manifest.model.model == "default";
                         let is_auto_spawned = restored_entry.name == "assistant"
                             && restored_entry.manifest.description == "General-purpose assistant";
+
+                        // Apply custom assistant system prompt from config if set
+                        if is_auto_spawned && !kernel.config.assistant_system_prompt.is_empty() {
+                            restored_entry.manifest.model.system_prompt =
+                                kernel.config.assistant_system_prompt.clone();
+                        }
+
                         if is_default_provider && is_default_model || is_auto_spawned {
                             if !dm.provider.is_empty() {
                                 restored_entry.manifest.model.provider = dm.provider.clone();
@@ -1193,7 +1200,11 @@ impl OpenFangKernel {
                 model: openfang_types::agent::ModelConfig {
                     provider: dm.provider.clone(),
                     model: dm.model.clone(),
-                    system_prompt: "You are a helpful AI assistant.".to_string(),
+                    system_prompt: if kernel.config.assistant_system_prompt.is_empty() {
+                        "You are a helpful AI assistant.".to_string()
+                    } else {
+                        kernel.config.assistant_system_prompt.clone()
+                    },
                     api_key_env: if dm.api_key_env.is_empty() {
                         None
                     } else {

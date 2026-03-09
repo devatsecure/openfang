@@ -4,6 +4,7 @@ description = "Autonomous future predictor — collects signals, builds reasonin
 category = "data"
 icon = "\U0001F52E"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query"]
+skills = ["security-audit", "web-search"]
 
 # ─── Configurable settings ───────────────────────────────────────────────────
 

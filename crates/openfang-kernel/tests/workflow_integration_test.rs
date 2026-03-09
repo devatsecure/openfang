@@ -397,7 +397,7 @@ async fn test_workflow_e2e_with_groq() {
     assert!(run.step_results[1].output_tokens > 0);
 
     // List runs
-    let runs = kernel.workflows.list_runs(None).await;
+    let runs = kernel.workflows.list_runs(None, None).await;
     assert_eq!(runs.len(), 1);
 
     kernel.shutdown();

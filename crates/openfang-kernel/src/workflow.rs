@@ -42,6 +42,13 @@ impl std::fmt::Display for WorkflowId {
     }
 }
 
+impl std::str::FromStr for WorkflowId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.parse()?))
+    }
+}
+
 /// Unique identifier for a running workflow instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkflowRunId(pub Uuid);
@@ -206,6 +213,8 @@ pub struct WorkflowEngine {
     runs: Arc<RwLock<HashMap<WorkflowRunId, WorkflowRun>>>,
     /// Path to persist workflows (e.g. ~/.openfang/workflows.json).
     persist_path: Option<PathBuf>,
+    /// Path to persist workflow runs (e.g. ~/.openfang/workflow_runs.json).
+    runs_persist_path: Option<PathBuf>,
 }
 
 impl WorkflowEngine {
@@ -215,13 +224,17 @@ impl WorkflowEngine {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(HashMap::new())),
             persist_path: None,
+            runs_persist_path: None,
         }
     }
 
     /// Create a new workflow engine with persistence to the given path.
     pub fn with_persistence(path: PathBuf) -> Self {
         let mut engine = Self::new();
+        // Derive runs path from workflows path (e.g. workflows.json → workflow_runs.json)
+        let runs_path = path.with_file_name("workflow_runs.json");
         engine.persist_path = Some(path);
+        engine.runs_persist_path = Some(runs_path);
         engine
     }
 
@@ -249,6 +262,40 @@ impl WorkflowEngine {
                 }
             }
             Err(e) => warn!("Failed to read workflows file: {e}"),
+        }
+
+        // Load persisted runs
+        if let Some(ref runs_path) = self.runs_persist_path {
+            if runs_path.exists() {
+                match std::fs::read_to_string(runs_path) {
+                    Ok(content) => {
+                        match serde_json::from_str::<Vec<WorkflowRun>>(&content) {
+                            Ok(runs) => {
+                                let mut map = self.runs.write().await;
+                                let count = runs.len();
+                                let mut zombies = 0;
+                                for mut r in runs {
+                                    // Runs left in pending/running state from a
+                                    // previous daemon session are zombies — mark failed.
+                                    if matches!(r.state, WorkflowRunState::Pending | WorkflowRunState::Running) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some("Daemon restarted during execution".to_string());
+                                        r.completed_at = Some(Utc::now());
+                                        zombies += 1;
+                                    }
+                                    map.insert(r.id, r);
+                                }
+                                info!("Loaded {count} persisted workflow runs from {:?}", runs_path);
+                                if zombies > 0 {
+                                    warn!("{zombies} zombie run(s) marked as failed");
+                                }
+                            }
+                            Err(e) => warn!("Failed to parse workflow runs file: {e}"),
+                        }
+                    }
+                    Err(e) => warn!("Failed to read workflow runs file: {e}"),
+                }
+            }
         }
     }
 
@@ -279,6 +326,39 @@ impl WorkflowEngine {
             }
             Err(e) => warn!("Failed to read workflows file: {e}"),
         }
+
+        // Load persisted runs
+        if let Some(ref runs_path) = self.runs_persist_path {
+            if runs_path.exists() {
+                match std::fs::read_to_string(runs_path) {
+                    Ok(content) => {
+                        match serde_json::from_str::<Vec<WorkflowRun>>(&content) {
+                            Ok(runs) => {
+                                let mut map = self.runs.try_write()
+                                    .expect("workflow runs lock uncontested at boot");
+                                let count = runs.len();
+                                let mut zombies = 0;
+                                for mut r in runs {
+                                    if matches!(r.state, WorkflowRunState::Pending | WorkflowRunState::Running) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some("Daemon restarted during execution".to_string());
+                                        r.completed_at = Some(Utc::now());
+                                        zombies += 1;
+                                    }
+                                    map.insert(r.id, r);
+                                }
+                                info!("Loaded {count} persisted workflow runs from {:?}", runs_path);
+                                if zombies > 0 {
+                                    warn!("{zombies} zombie run(s) marked as failed");
+                                }
+                            }
+                            Err(e) => warn!("Failed to parse workflow runs file: {e}"),
+                        }
+                    }
+                    Err(e) => warn!("Failed to read workflow runs file: {e}"),
+                }
+            }
+        }
     }
 
     /// Persist workflows to disk.
@@ -291,6 +371,27 @@ impl WorkflowEngine {
                 }
             }
             Err(e) => warn!("Failed to serialize workflows: {e}"),
+        }
+    }
+
+    /// Persist current runs to disk if a persist path is configured.
+    async fn persist_runs(&self) {
+        if let Some(ref path) = self.runs_persist_path {
+            let runs = self.runs.read().await;
+            Self::persist_runs_sync(&runs, path);
+        }
+    }
+
+    /// Persist workflow runs to disk.
+    fn persist_runs_sync(runs: &HashMap<WorkflowRunId, WorkflowRun>, path: &std::path::Path) {
+        let items: Vec<&WorkflowRun> = runs.values().collect();
+        match serde_json::to_string_pretty(&items) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(path, json) {
+                    warn!("Failed to persist workflow runs: {e}");
+                }
+            }
+            Err(e) => warn!("Failed to serialize workflow runs: {e}"),
         }
     }
 
@@ -406,6 +507,10 @@ impl WorkflowEngine {
             }
         }
 
+        if let Some(ref path) = self.runs_persist_path {
+            Self::persist_runs_sync(&runs, path);
+        }
+
         Some(run_id)
     }
 
@@ -414,13 +519,22 @@ impl WorkflowEngine {
         self.runs.read().await.get(&run_id).cloned()
     }
 
-    /// List all workflow runs (optionally filtered by state).
-    pub async fn list_runs(&self, state_filter: Option<&str>) -> Vec<WorkflowRun> {
+    /// List all workflow runs (optionally filtered by workflow ID and/or state).
+    pub async fn list_runs(
+        &self,
+        workflow_id: Option<WorkflowId>,
+        state_filter: Option<&str>,
+    ) -> Vec<WorkflowRun> {
         self.runs
             .read()
             .await
             .values()
             .filter(|r| {
+                if let Some(wid) = workflow_id {
+                    if r.workflow_id != wid {
+                        return false;
+                    }
+                }
                 state_filter
                     .map(|f| match f {
                         "pending" => matches!(r.state, WorkflowRunState::Pending),
@@ -646,6 +760,7 @@ impl WorkflowEngine {
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
                             }
+                            self.persist_runs().await;
                             return Err(e);
                         }
                     }
@@ -724,6 +839,7 @@ impl WorkflowEngine {
                                     r.error = Some(error_msg.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
+                                self.persist_runs().await;
                                 return Err(error_msg);
                             }
                             Err(_) => {
@@ -737,6 +853,7 @@ impl WorkflowEngine {
                                     r.error = Some(error_msg.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
+                                self.persist_runs().await;
                                 return Err(error_msg);
                             }
                         }
@@ -816,6 +933,7 @@ impl WorkflowEngine {
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
                             }
+                            self.persist_runs().await;
                             return Err(e);
                         }
                     }
@@ -902,6 +1020,9 @@ impl WorkflowEngine {
             }
 
             i += 1;
+
+            // Persist after each step so progress survives daemon restarts
+            self.persist_runs().await;
         }
 
         // Mark workflow as completed
@@ -911,6 +1032,7 @@ impl WorkflowEngine {
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
         }
+        self.persist_runs().await;
 
         info!(run_id = %run_id, "Workflow completed successfully");
         Ok(final_output)
