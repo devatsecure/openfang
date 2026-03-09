@@ -50,6 +50,7 @@ let statusMessage = 'Not started';
 let lastActivityAt = 0;       // timestamp of last known good Baileys activity
 let heartbeatTimer = null;    // setInterval handle for heartbeat watchdog
 let reconnecting = false;     // guard against overlapping reconnect attempts
+let reconnectTimer = null;    // scheduled reconnect timer handle
 let conflictCount = 0;        // consecutive conflict disconnects (for backoff)
 const startedAt = Date.now(); // process start time
 
@@ -96,9 +97,30 @@ function stopHeartbeat() {
   }
 }
 
-async function triggerReconnect() {
-  if (reconnecting) return;
+function scheduleReconnect(delayMs, reason) {
+  if (reconnectTimer) {
+    console.log(`[gateway] Reconnect already scheduled, skipping (${reason})`);
+    return;
+  }
+
   reconnecting = true;
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await startConnection();
+    } catch (err) {
+      console.error(`[gateway] Reconnect failed (${reason}):`, err.message);
+      reconnecting = false;
+      // Retry after backoff only if no other reconnect is pending.
+      scheduleReconnect(10_000, `retry-after-failure:${reason}`);
+      return;
+    }
+    reconnecting = false;
+  }, delayMs);
+}
+
+async function triggerReconnect() {
+  if (reconnecting || reconnectTimer) return;
 
   console.log('[gateway] Self-healing: initiating reconnect...');
   connStatus = 'reconnecting';
@@ -111,20 +133,8 @@ async function triggerReconnect() {
   }
   stopHeartbeat();
 
-  // Brief delay then reconnect
-  await new Promise(r => setTimeout(r, 3000));
-  try {
-    await startConnection();
-  } catch (err) {
-    console.error('[gateway] Self-heal reconnect failed:', err.message);
-    // Retry after backoff
-    setTimeout(() => {
-      reconnecting = false;
-      triggerReconnect();
-    }, 10_000);
-    return;
-  }
-  reconnecting = false;
+  // Brief delay then reconnect (single-flight).
+  scheduleReconnect(3000, 'self-heal');
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +211,14 @@ async function startConnection() {
 
     if (connection === 'close') {
       stopHeartbeat();
+
+      // Close events can fire while a controlled reconnect is already in-flight.
+      // Ignore these to prevent duplicate startConnection() calls.
+      if (reconnecting || reconnectTimer) {
+        console.log('[gateway] Connection closed during reconnect; awaiting scheduled reconnect');
+        return;
+      }
+
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const reason = lastDisconnect?.error?.output?.payload?.message || 'unknown';
       console.log(`[gateway] Connection closed: ${reason} (${statusCode})`);
@@ -225,7 +243,7 @@ async function startConnection() {
         console.log(`[gateway] Conflict disconnect #${conflictCount}, backing off ${backoff / 1000}s`);
         connStatus = 'reconnecting';
         statusMessage = `Conflict — retrying in ${backoff / 1000}s`;
-        setTimeout(() => startConnection(), backoff);
+        scheduleReconnect(backoff, 'conflict');
       } else {
         // Check for crypto/encryption errors (stale sessions after macOS sleep)
         const fullError = lastDisconnect?.error?.message || reason;
@@ -260,7 +278,7 @@ async function startConnection() {
         connStatus = 'reconnecting';
         console.log('[gateway] Reconnecting in 3s...');
         statusMessage = 'Reconnecting...';
-        setTimeout(() => startConnection(), 3000);
+        scheduleReconnect(3000, 'connection-close');
       }
     }
 
