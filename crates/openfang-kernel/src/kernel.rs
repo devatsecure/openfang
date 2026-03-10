@@ -556,6 +556,16 @@ impl OpenFangKernel {
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
+        // Fail fast if data dir is read-only (e.g. sandbox) so we report a clear error
+        let canary = config.data_dir.join(".openfang_writable_check");
+        if let Err(e) = std::fs::write(&canary, b"") {
+            return Err(KernelError::BootFailed(format!(
+                "Data directory is not writable (e.g. read-only sandbox): {e}. \
+                 OpenFang needs a writable path. Set data_dir in config to a writable location or run outside the sandbox."
+            )));
+        }
+        let _ = std::fs::remove_file(&canary);
+
         // Initialize memory substrate
         let db_path = config
             .memory

@@ -109,6 +109,18 @@ openfang init
 
 This creates `~/.openfang/config.toml` with sensible defaults.
 
+### Daemon fails: "Data directory is not writable" or "attempt to write a readonly database"
+
+**Symptom**: `openfang start` fails with "Data directory is not writable" or "Memory init failed: ... attempt to write a readonly database".
+
+**Cause**: The daemon needs to write to the data directory (default `~/.openfang/data/`, including `openfang.db`). If that path is read-only — for example when running inside a sandbox that mounts the home directory read-only — SQLite cannot open or migrate the database.
+
+**Fix**:
+1. **Run outside the sandbox** so the process has write access to `~/.openfang/data/`, or
+2. **Point data_dir to a writable path**: in `~/.openfang/config.toml` set `data_dir = "/path/to/writable/dir"` (e.g. a directory the sandbox allows writing to), then restart.
+
+**See also**: [Configuration](configuration.md) for `data_dir` and `memory.sqlite_path`.
+
 ### "Missing API key" warnings on start
 
 **Cause**: No LLM provider API key found in environment.
@@ -263,6 +275,14 @@ python -m vllm.entrypoints.openai.api_server --model ...
 2. Webhook URL is correctly configured in the platform dashboard
 3. Webhook port is open and not blocked by firewall
 4. Verify token matches between config and platform dashboard
+
+### WhatsApp: WHATSAPP_ACCESS_TOKEN not set but Web gateway healthy
+
+**Symptom**: Logs or UI indicate that `WHATSAPP_ACCESS_TOKEN` is not set, while the WhatsApp Web gateway (e.g. on port 3009) reports healthy and connected.
+
+**Cause**: The WhatsApp adapter supports two paths: **Cloud API** (requires the Meta access token) and **Web/QR gateway** (no token). When the token is unset, the Cloud API path is not configured; the adapter uses the Web gateway for both incoming and outgoing messages.
+
+**What to do**: This is expected. If you are using the Web gateway only, you do not need to set `WHATSAPP_ACCESS_TOKEN`. To use the official Cloud API instead, set the token and configure `phone_number_id` and webhook in the Meta Business dashboard; see [Channel Adapters](channel-adapters.md#whatsapp) and [Configuration](configuration.md).
 
 ### "Channel adapter failed to start"
 
@@ -444,6 +464,19 @@ cors_origins = ["http://localhost:5173", "https://your-app.com"]
    If you must keep using the same hand agents for workflows for now, you can raise `max_llm_tokens_per_hour` for those hands (e.g. to 2_000_000). In bundled hands this is set via the runtime default (1M); you can override by adding `[agent.resources]` in the hand’s config or in the hydrated DB. Prefer (1) and (2) over this.
 
 **See also**: [Workflow engine guide](workflows.md), [Configuration](configuration.md) for `[compaction]` and session limits.
+
+### Workflow step / agent-auto timing out ("The request timed out")
+
+**Symptom**: A workflow step (e.g. "Deep AI Leaders Research") fails with `LLM driver error: The request timed out. Check your network connection.` even though the proxy is running.
+
+**Cause**: The **caller** (OpenFang) aborts the step before the proxy responds. Each workflow step has a maximum time (`timeout_secs`). The default is **300 seconds** (5 minutes). If your proxy (e.g. claude-code-proxy for `agent-auto`) is configured with a longer wait (e.g. `AGENT_TIMEOUT` in the proxy), the step will be killed when the step timeout is reached.
+
+**What to do**:
+
+1. **Proxy**: In the proxy repo, ensure `AGENT_TIMEOUT` (or equivalent) is set; the proxy logs `[agent] Running ...` and `[agent] Response: ... in Ns` so you can see how long each request actually takes.
+2. **OpenFang**: Step default is 300s. For a specific step, set `timeout_secs` in the workflow JSON (e.g. `"timeout_secs": 600`) so it is **≥** the proxy’s wait time. If you need a higher global default, change `default_timeout()` in `crates/openfang-kernel/src/workflow.rs` and rebuild.
+
+**See also**: [Workflows](workflows.md) (step `timeout_secs`), proxy README troubleshooting (caller timeout ≥ proxy `AGENT_TIMEOUT`).
 
 ---
 

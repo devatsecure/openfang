@@ -19,10 +19,28 @@ use openfang_types::memory::{
     ConsolidationReport, Entity, ExportFormat, GraphMatch, GraphPattern, ImportReport, Memory,
     MemoryFilter, MemoryFragment, MemoryId, MemorySource, Relation,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// Map SQLite errors to user-friendly messages. Read-only DB (e.g. sandbox) gets actionable guidance.
+fn map_db_error(e: rusqlite::Error) -> String {
+    let msg = e.to_string();
+    let is_readonly = matches!(e, rusqlite::Error::SqliteFailure(ref ffi_err, _) if ffi_err.code == ErrorCode::ReadOnly)
+        || msg.to_lowercase().contains("readonly")
+        || msg.to_lowercase().contains("read-only");
+    if is_readonly {
+        format!(
+            "Database or data directory is read-only (e.g. sandbox). {} \
+             Set data_dir in config to a writable path or run the daemon outside the sandbox. \
+             Original: {msg}",
+            "OpenFang needs a writable path for ~/.openfang/data (or your configured data_dir)."
+        )
+    } else {
+        msg
+    }
+}
 
 /// The unified memory substrate. Implements the `Memory` trait by delegating
 /// to specialized stores backed by a shared SQLite connection.
@@ -40,10 +58,11 @@ pub struct MemorySubstrate {
 impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
     pub fn open(db_path: &Path, decay_rate: f32) -> OpenFangResult<Self> {
-        let conn = Connection::open(db_path).map_err(|e| OpenFangError::Memory(e.to_string()))?;
+        let conn =
+            Connection::open(db_path).map_err(|e| OpenFangError::Memory(map_db_error(e)))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .map_err(|e| OpenFangError::Memory(e.to_string()))?;
-        run_migrations(&conn).map_err(|e| OpenFangError::Memory(e.to_string()))?;
+            .map_err(|e| OpenFangError::Memory(map_db_error(e)))?;
+        run_migrations(&conn).map_err(|e| OpenFangError::Memory(map_db_error(e)))?;
         let shared = Arc::new(Mutex::new(conn));
 
         Ok(Self {

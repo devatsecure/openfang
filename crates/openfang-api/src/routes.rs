@@ -846,13 +846,20 @@ pub async fn list_workflow_runs(
     let list: Vec<serde_json::Value> = runs
         .iter()
         .map(|r| {
+            let elapsed_secs = r.completed_at
+                .unwrap_or_else(chrono::Utc::now)
+                .signed_duration_since(r.started_at)
+                .num_seconds();
             serde_json::json!({
                 "id": r.id.to_string(),
                 "workflow_name": r.workflow_name,
                 "state": serde_json::to_value(&r.state).unwrap_or_default(),
                 "steps_completed": r.step_results.len(),
+                "current_step": r.current_step,
+                "outputs": r.outputs,
                 "started_at": r.started_at.to_rfc3339(),
                 "completed_at": r.completed_at.map(|t| t.to_rfc3339()),
+                "elapsed_secs": elapsed_secs,
                 "error": r.error,
             })
         })

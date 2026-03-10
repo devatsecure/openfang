@@ -16,6 +16,18 @@ use tracing::{debug, warn};
 
 use crate::embedding::EmbeddingDriver;
 
+/// True when the embedding failure is likely "model not available" (e.g. Ollama nomic-embed-text not pulled).
+/// We log these at debug to avoid spamming when using text fallback by design.
+fn is_embedding_unavailable_fallback(e: &crate::embedding::EmbeddingError) -> bool {
+    let msg = e.to_string().to_lowercase();
+    msg.contains("not found")
+        || msg.contains("404")
+        || msg.contains("model")
+        || msg.contains("nomic")
+        || msg.contains("connection refused")
+        || msg.contains("connection reset")
+}
+
 /// Assembled context ready for an LLM call.
 pub struct AssembledContext {
     /// The system prompt (with recalled memories appended).
@@ -74,7 +86,11 @@ impl ContextEngine for DefaultContextEngine {
                         .unwrap_or_default()
                 }
                 Err(e) => {
-                    warn!("ContextEngine: embedding failed, falling back: {e}");
+                    if is_embedding_unavailable_fallback(&e) {
+                        debug!("ContextEngine: embedding unavailable (e.g. Ollama model not installed), using text fallback: {e}");
+                    } else {
+                        warn!("ContextEngine: embedding failed, falling back: {e}");
+                    }
                     memory
                         .recall(
                             query,
@@ -164,7 +180,11 @@ impl ContextEngine for HybridContextEngine {
                     Some(v)
                 }
                 Err(e) => {
-                    warn!("HybridContextEngine: embedding failed, FTS5-only mode: {e}");
+                    if is_embedding_unavailable_fallback(&e) {
+                        debug!("HybridContextEngine: embedding unavailable (e.g. Ollama model not installed), FTS5-only: {e}");
+                    } else {
+                        warn!("HybridContextEngine: embedding failed, FTS5-only mode: {e}");
+                    }
                     None
                 }
             }

@@ -97,7 +97,8 @@ pub struct WorkflowStep {
     pub prompt_template: String,
     /// Execution mode for this step.
     pub mode: StepMode,
-    /// Maximum time for this step in seconds (default: 120).
+    /// Maximum time for this step in seconds (default: 300).
+    /// Should be ≥ the proxy's AGENT_TIMEOUT when using agent-auto / claude-code-proxy (e.g. 300s).
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
     /// Error handling mode for this step (default: Fail).
@@ -109,7 +110,7 @@ pub struct WorkflowStep {
 }
 
 fn default_timeout() -> u64 {
-    120
+    300
 }
 
 /// How to identify the agent for a step.
@@ -177,6 +178,12 @@ pub struct WorkflowRun {
     pub state: WorkflowRunState,
     /// Results from each completed step.
     pub step_results: Vec<StepResult>,
+    /// Named output variables from steps (e.g. "research", "tweet").
+    #[serde(default)]
+    pub outputs: HashMap<String, String>,
+    /// Name of the currently executing step (if running).
+    #[serde(default)]
+    pub current_step: Option<String>,
     /// Final output (set when workflow completes).
     pub output: Option<String>,
     /// Error message if failed.
@@ -513,6 +520,8 @@ impl WorkflowEngine {
             input,
             state: WorkflowRunState::Pending,
             step_results: Vec::new(),
+            outputs: HashMap::new(),
+            current_step: None,
             output: None,
             error: None,
             started_at: Utc::now(),
@@ -745,6 +754,12 @@ impl WorkflowEngine {
         while i < workflow.steps.len() {
             let step = &workflow.steps[i];
 
+            // Update current_step before execution
+            if let Some(r) = self.runs.write().await.get_mut(&run_id) {
+                r.current_step = Some(step.name.clone());
+            }
+            self.persist_runs().await;
+
             debug!(
                 step = i + 1,
                 name = %step.name,
@@ -782,6 +797,10 @@ impl WorkflowEngine {
 
                             if let Some(ref var) = step.output_var {
                                 variables.insert(var.clone(), output.clone());
+                                // Also save to run.outputs for API access
+                                if let Some(r) = self.runs.write().await.get_mut(&run_id) {
+                                    r.outputs.insert(var.clone(), output.clone());
+                                }
                             }
 
                             all_outputs.push(output.clone());
@@ -1067,6 +1086,7 @@ impl WorkflowEngine {
         let final_output = current_input.clone();
         if let Some(r) = self.runs.write().await.get_mut(&run_id) {
             r.state = WorkflowRunState::Completed;
+            r.current_step = None;
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
         }

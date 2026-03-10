@@ -1534,6 +1534,11 @@ fn boot_kernel_error(e: &openfang_kernel::error::KernelError) {
             "Failed to parse configuration",
             "Check your config.toml syntax: openfang config show",
         );
+    } else if msg.contains("not writable") || msg.contains("read-only") || msg.contains("readonly") {
+        ui::error_with_fix(
+            "Data directory is read-only (e.g. sandbox)",
+            "Run the daemon outside the sandbox, or set data_dir in config to a writable path: openfang config show",
+        );
     } else if msg.contains("database") || msg.contains("locked") || msg.contains("sqlite") {
         ui::error_with_fix(
             "Database error (file may be locked)",

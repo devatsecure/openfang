@@ -2040,8 +2040,8 @@ mod tests {
 
     #[test]
     fn test_retry_constants() {
-        assert_eq!(MAX_RETRIES, 3);
-        assert_eq!(BASE_RETRY_DELAY_MS, 1000);
+        assert_eq!(MAX_RETRIES, 5);
+        assert_eq!(BASE_RETRY_DELAY_MS, 2000);
     }
 
     #[test]
