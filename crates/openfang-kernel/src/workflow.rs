@@ -299,8 +299,38 @@ impl WorkflowEngine {
         }
     }
 
+    /// Migrate workflow steps from hand agent names to workflow-only pipeline runners.
+    /// Ensures cron workflows use isolated agents (no shared quota/session with hands).
+    fn migrate_hand_steps_to_pipeline_runners(workflows: Vec<Workflow>) -> (Vec<Workflow>, bool) {
+        const MIGRATIONS: &[(&str, &str)] = &[
+            ("researcher-hand", "research-pipeline-runner"),
+            ("twitter-hand", "twitter-pipeline-runner"),
+            ("strategist-hand", "strategist-pipeline-runner"),
+        ];
+        let mut changed = false;
+        let workflows: Vec<Workflow> = workflows
+            .into_iter()
+            .map(|mut w| {
+                for step in &mut w.steps {
+                    if let StepAgent::ByName { name } = &mut step.agent {
+                        for (from, to) in MIGRATIONS {
+                            if name == *from {
+                                *name = (*to).to_string();
+                                changed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                w
+            })
+            .collect();
+        (workflows, changed)
+    }
+
     /// Load persisted workflows from disk (sync). Safe to call at boot
     /// before any concurrent access — uses `try_write()` on the RwLock.
+    /// Migrates steps that reference hand agents to use pipeline-runner agents.
     pub fn load_persisted_sync(&self) {
         let path = match &self.persist_path {
             Some(p) => p,
@@ -313,6 +343,11 @@ impl WorkflowEngine {
             Ok(content) => {
                 match serde_json::from_str::<Vec<Workflow>>(&content) {
                     Ok(workflows) => {
+                        let (workflows, migrated) =
+                            Self::migrate_hand_steps_to_pipeline_runners(workflows);
+                        if migrated {
+                            info!("Migrated workflow step(s) from hand agents to pipeline-runner agents");
+                        }
                         let mut map = self.workflows.try_write()
                             .expect("workflow lock uncontested at boot");
                         let count = workflows.len();
@@ -320,6 +355,9 @@ impl WorkflowEngine {
                             map.insert(w.id, w);
                         }
                         info!("Loaded {count} persisted workflows from {:?}", path);
+                        if migrated {
+                            Self::persist_sync(&map, path);
+                        }
                     }
                     Err(e) => warn!("Failed to parse workflows file: {e}"),
                 }
@@ -1085,6 +1123,60 @@ mod tests {
     fn mock_resolver(agent: &StepAgent) -> Option<(AgentId, String)> {
         let _ = agent;
         Some((AgentId::new(), "mock-agent".to_string()))
+    }
+
+    #[tokio::test]
+    async fn test_migrate_hand_steps_to_pipeline_runners() {
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "migrate-test".to_string(),
+            description: "Test migration".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "research".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "researcher-hand".to_string(),
+                    },
+                    prompt_template: "Research: {{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 60,
+                    error_mode: ErrorMode::Fail,
+                    output_var: Some("research".to_string()),
+                },
+                WorkflowStep {
+                    name: "post".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "twitter-hand".to_string(),
+                    },
+                    prompt_template: "Post: {{research}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 60,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                },
+            ],
+            created_at: Utc::now(),
+        };
+        let (migrated, changed) =
+            WorkflowEngine::migrate_hand_steps_to_pipeline_runners(vec![wf]);
+        assert!(changed);
+        assert_eq!(migrated.len(), 1);
+        match &migrated[0].steps[0].agent {
+            StepAgent::ByName { name } => assert_eq!(name, "research-pipeline-runner"),
+            _ => panic!("expected ByName"),
+        }
+        match &migrated[0].steps[1].agent {
+            StepAgent::ByName { name } => assert_eq!(name, "twitter-pipeline-runner"),
+            _ => panic!("expected ByName"),
+        }
+
+        let (unchanged, no_change) =
+            WorkflowEngine::migrate_hand_steps_to_pipeline_runners(vec![test_workflow()]);
+        assert!(!no_change);
+        match &unchanged[0].steps[0].agent {
+            StepAgent::ByName { name } => assert_eq!(name, "analyst"),
+            _ => panic!("expected ByName"),
+        }
     }
 
     #[tokio::test]

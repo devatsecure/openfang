@@ -6,6 +6,8 @@
 //! LLM tests require GROQ_API_KEY. Non-LLM tests verify the kernel-level
 //! workflow wiring without making real API calls.
 
+use std::path::PathBuf;
+
 use openfang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
 };
@@ -147,6 +149,7 @@ memory_write = ["self.*"]
     // Verify workflow is registered
     let workflows = kernel.workflows.list_workflows().await;
     assert_eq!(workflows.len(), 1);
+    assert_eq!(workflows[0].id, wf_id);
     assert_eq!(workflows[0].name, "alpha-beta-pipeline");
 
     // Verify agents can be found by name
@@ -157,8 +160,88 @@ memory_write = ["self.*"]
     let beta = kernel.registry.find_by_name("agent-beta");
     assert!(beta.is_some());
     assert_eq!(beta.unwrap().id, beta_id);
+}
 
-    // Verify workflow run can be created
+// ---------------------------------------------------------------------------
+// Workflow pipeline runner agents: boot-time spawn and migration
+// ---------------------------------------------------------------------------
+
+/// Test that workflow-only pipeline runner agents are spawned at boot when their
+/// TOML exists under ~/.openfang/agents/ and are resolvable for workflow steps.
+#[tokio::test]
+async fn test_workflow_pipeline_runners_spawn_at_boot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().join("agents");
+
+    // Paths from repo root (test runs from crate dir)
+    let repo_agents = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../agents");
+    for name in [
+        "research-pipeline-runner",
+        "twitter-pipeline-runner",
+        "strategist-pipeline-runner",
+    ] {
+        let toml_path = repo_agents.join(name).join("agent.toml");
+        let content = std::fs::read_to_string(&toml_path).unwrap_or_else(|e| {
+            panic!("Missing {}: {}", toml_path.display(), e)
+        });
+        let dest_dir = agents_dir.join(name);
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::fs::write(dest_dir.join("agent.toml"), content).unwrap();
+    }
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = OpenFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+
+    // Boot spawns default assistant when registry empty, then spawns pipeline runners from TOML
+    assert!(
+        kernel.registry.find_by_name("research-pipeline-runner").is_some(),
+        "research-pipeline-runner should be spawned at boot"
+    );
+    assert!(
+        kernel.registry.find_by_name("twitter-pipeline-runner").is_some(),
+        "twitter-pipeline-runner should be spawned at boot"
+    );
+    assert!(
+        kernel.registry.find_by_name("strategist-pipeline-runner").is_some(),
+        "strategist-pipeline-runner should be spawned at boot"
+    );
+
+    // Workflow step resolver can resolve by name (needed for run_workflow)
+    let workflow = Workflow {
+        id: WorkflowId::new(),
+        name: "pipeline-runner-test".to_string(),
+        description: "Uses pipeline runner agents".to_string(),
+        steps: vec![WorkflowStep {
+            name: "research".to_string(),
+            agent: StepAgent::ByName {
+                name: "research-pipeline-runner".to_string(),
+            },
+            prompt_template: "One sentence on Rust: {{input}}".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+        }],
+        created_at: chrono::Utc::now(),
+    };
+    let wf_id = kernel.register_workflow(workflow).await;
+    // Run would call LLM; just verify run can be created (execute_run needs resolver + send_message)
+    let runs = kernel.workflows.list_runs(None, None).await;
+    assert_eq!(runs.len(), 0);
+
+    // Verify workflow run can be created (resolver will find research-pipeline-runner)
     let run_id = kernel
         .workflows
         .create_run(wf_id, "test input".to_string())

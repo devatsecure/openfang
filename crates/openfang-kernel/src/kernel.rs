@@ -1221,6 +1221,44 @@ impl OpenFangKernel {
             }
         }
 
+        // Ensure workflow-only pipeline runner agents exist (for cron workflows).
+        // Spawn from ~/.openfang/agents/ if TOML exists and agent not yet in registry.
+        const WORKFLOW_RUNNER_AGENTS: &[&str] = &[
+            "research-pipeline-runner",
+            "twitter-pipeline-runner",
+            "strategist-pipeline-runner",
+        ];
+        for name in WORKFLOW_RUNNER_AGENTS {
+            if kernel.registry.find_by_name(name).is_some() {
+                continue;
+            }
+            let toml_path = kernel
+                .config
+                .home_dir
+                .join("agents")
+                .join(name)
+                .join("agent.toml");
+            if !toml_path.exists() {
+                continue;
+            }
+            match std::fs::read_to_string(&toml_path) {
+                Ok(toml_str) => match toml::from_str::<AgentManifest>(&toml_str) {
+                    Ok(manifest) => {
+                        match kernel.spawn_agent(manifest) {
+                            Ok(id) => info!(agent = %name, id = %id, "Workflow runner agent spawned"),
+                            Err(e) => warn!(agent = %name, "Failed to spawn workflow runner: {e}"),
+                        }
+                    }
+                    Err(e) => warn!(
+                        agent = %name,
+                        path = %toml_path.display(),
+                        "Invalid workflow runner TOML: {e}"
+                    ),
+                },
+                Err(e) => warn!(agent = %name, "Failed to read workflow runner TOML: {e}"),
+            }
+        }
+
         // Validate routing configs against model catalog
         for entry in kernel.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
@@ -1644,8 +1682,9 @@ impl OpenFangKernel {
             }
         }
 
-        // Build structured system prompt
+        // Build structured system prompt (workflow ephemeral: no canonical session injection)
         {
+            let skip_canonical = true; // workflow steps get isolated context
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let user_name = self
@@ -1694,11 +1733,14 @@ impl OpenFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if skip_canonical {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest

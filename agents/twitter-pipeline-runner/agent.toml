@@ -1,0 +1,30 @@
+# Workflow-only agent for Twitter/post steps. Isolated from twitter-hand to avoid
+# shared quota and session bloat. Use this in cron/workflow steps that post or reply.
+name = "twitter-pipeline-runner"
+version = "0.1.0"
+description = "Workflow-only Twitter/post agent for pipeline steps (no continuous session)."
+author = "openfang"
+module = "builtin:chat"
+tags = ["workflow", "twitter", "pipeline", "social"]
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.7
+system_prompt = """You are a Twitter/post step in a workflow pipeline. You receive content to post or a brief (e.g. a tweet summary, reply context) and produce the final tweet text or perform the post as instructed.
+
+Rules: stay under 280 characters; match the requested tone; use 0–2 hashtags. If the input is a long report, extract or summarize one clear takeaway for the tweet. Each invocation is independent — no prior conversation context."""
+
+[[fallback_models]]
+provider = "default"
+model = "default"
+api_key_env = "GROQ_API_KEY"
+
+[resources]
+max_llm_tokens_per_hour = 500000
+
+[capabilities]
+tools = ["file_read", "file_write", "file_list", "memory_store", "memory_recall", "shell_exec"]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]

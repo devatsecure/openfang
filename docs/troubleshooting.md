@@ -12,6 +12,7 @@ Common issues, diagnostics, and answers to frequently asked questions about Open
 - [Agent Issues](#agent-issues)
 - [API Issues](#api-issues)
 - [Desktop App Issues](#desktop-app-issues)
+- [Workflow and cron pipeline issues](#workflow-and-cron-pipeline-issues)
 - [Performance](#performance)
 - [FAQ](#faq)
 
@@ -410,6 +411,39 @@ cors_origins = ["http://localhost:5173", "https://your-app.com"]
 - **Linux**: Requires a system tray (e.g., `libappindicator` on GNOME)
 - **macOS**: Should work out of the box
 - **Windows**: Check notification area settings, may need to show hidden icons
+
+---
+
+## Workflow and cron pipeline issues
+
+### "Resource quota exceeded: Token limit exceeded" on workflow runs
+
+**Symptom**: AI Leaders Research Pipeline, Reply to Mentions Pipeline (or other cron workflows) fail with `Token limit exceeded: XXXXX / 1000000` or similar. `workflow_runs.json` shows steps like "Post Tweet" or "Research Mention Context" burning very large input token counts (e.g. 700K+).
+
+**Cause**: Two main contributors:
+
+1. **Shared quota with hands**: Workflow steps that use **hand agents by name** (e.g. `twitter-hand`, `researcher-hand`, `strategist-hand`) run against the same agent ID as the long-lived autonomous hand. The hand’s hourly token quota (default 1M from `ResourceQuota.max_llm_tokens_per_hour`) is shared: background hand ticks plus the workflow step both count. One big step can push the total over the limit.
+
+2. **Large step inputs**: If a step’s prompt template uses `{{input}}` from a previous step and that output is huge (e.g. full research report), the next step’s input token count can be very large even with an ephemeral session.
+
+**What the codebase does**:
+
+- Workflow steps use **ephemeral sessions** (`send_message_ephemeral`): no prior conversation history is loaded for the step.
+- As of the workflow-isolation fix, ephemeral steps also **do not** receive the agent’s canonical session context (so long-lived hand history is not injected into workflow steps).
+
+**Recommended next steps (in order)**:
+
+1. **Isolate workflow agents (best)**  
+   Stop using the continuous hands directly for cron workflows. Create separate workflow-only agents (e.g. `research-pipeline-runner`, `post-tweet-runner`) with their own manifests and fresh sessions, and point workflow steps at those agents by name. That way cron jobs don’t share quota or context with the autonomous hands.
+
+2. **Trim step payloads**  
+   - **Post Tweet**: Don’t pass the full research output into the Post Tweet step. Use a dedicated output variable (e.g. `{{tweet_summary}}`) that a prior step fills with a short summary (e.g. 1–2 paragraphs).  
+   - **Research Mention Context**: Cap the number of mentions and the number of search passes so the prompt size stays bounded.
+
+3. **Raise hand quotas (symptom only)**  
+   If you must keep using the same hand agents for workflows for now, you can raise `max_llm_tokens_per_hour` for those hands (e.g. to 2_000_000). In bundled hands this is set via the runtime default (1M); you can override by adding `[agent.resources]` in the hand’s config or in the hydrated DB. Prefer (1) and (2) over this.
+
+**See also**: [Workflow engine guide](workflows.md), [Configuration](configuration.md) for `[compaction]` and session limits.
 
 ---
 
