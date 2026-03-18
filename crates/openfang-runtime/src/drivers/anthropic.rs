@@ -39,6 +39,19 @@ impl AnthropicDriver {
         }
     }
 
+    /// Return a new driver with a custom HTTP timeout (seconds).
+    /// Use for workflow steps where the step timeout is the primary guard
+    /// and the HTTP timeout is just a safety net to prevent zombie sockets.
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.client = reqwest::Client::builder()
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .timeout(std::time::Duration::from_secs(secs))
+            .build()
+            .expect("Failed to build Anthropic HTTP client");
+        self
+    }
+
     /// Return a clone of this driver with extra headers applied to every request.
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;

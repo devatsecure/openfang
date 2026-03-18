@@ -1857,6 +1857,7 @@ impl OpenFangKernel {
                     .unwrap_or_else(|| "http://localhost:3456".to_string());
                 let priority_driver =
                     openfang_runtime::drivers::anthropic::AnthropicDriver::new(api_key, base_url)
+                        .with_timeout_secs(180) // safety net only; step timeout is primary
                         .with_extra_headers(vec![(
                             "X-Priority".to_string(),
                             "high".to_string(),
