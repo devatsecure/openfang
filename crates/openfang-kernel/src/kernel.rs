@@ -1839,7 +1839,33 @@ impl OpenFangKernel {
             }
         }
 
-        let driver = self.resolve_driver(&manifest)?;
+        // Workflow steps get a priority-tagged driver so the proxy queue
+        // prioritises them over background hand polling requests.
+        let driver = {
+            let base = self.resolve_driver(&manifest)?;
+            if manifest.model.provider == "claude-code-proxy"
+                || self.config.default_model.provider == "claude-code-proxy"
+            {
+                let api_key = std::env::var(&self.config.default_model.api_key_env)
+                    .ok()
+                    .unwrap_or_default();
+                let base_url = self
+                    .config
+                    .default_model
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "http://localhost:3456".to_string());
+                let priority_driver =
+                    openfang_runtime::drivers::anthropic::AnthropicDriver::new(api_key, base_url)
+                        .with_extra_headers(vec![(
+                            "X-Priority".to_string(),
+                            "high".to_string(),
+                        )]);
+                Arc::new(priority_driver) as Arc<dyn openfang_runtime::llm_driver::LlmDriver>
+            } else {
+                base
+            }
+        };
 
         let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
             cat.find_model(&manifest.model.model)
@@ -3852,21 +3878,53 @@ impl OpenFangKernel {
 
         // Message sender: uses ephemeral sessions so each workflow step starts
         // with a clean conversation context (prevents session bloat across runs).
+        // Includes retry logic for transient proxy/connection errors (408, 429,
+        // connection refused) with 5s backoff between attempts.
         // Clone the Arc so the closure is 'static (required for tokio::spawn cancellation).
         let kernel = Arc::clone(self);
         let send_message = move |agent_id: AgentId, message: String| {
             let k = Arc::clone(&kernel);
             async move {
-                k.send_message_ephemeral(agent_id, &message)
-                    .await
-                    .map(|r| {
-                        (
-                            r.response,
-                            r.total_usage.input_tokens,
-                            r.total_usage.output_tokens,
-                        )
-                    })
-                    .map_err(|e| format!("{e}"))
+                const MAX_RETRIES: u32 = 3;
+                const RETRY_DELAY_SECS: u64 = 5;
+
+                let mut last_err = String::new();
+                for attempt in 0..MAX_RETRIES {
+                    match k.send_message_ephemeral(agent_id, &message).await {
+                        Ok(r) => {
+                            return Ok((
+                                r.response,
+                                r.total_usage.input_tokens,
+                                r.total_usage.output_tokens,
+                            ));
+                        }
+                        Err(e) => {
+                            last_err = format!("{e}");
+                            let is_transient = last_err.contains("error sending request")
+                                || last_err.contains("connection refused")
+                                || last_err.contains("connection reset")
+                                || last_err.contains("408")
+                                || last_err.contains("429")
+                                || last_err.contains("502")
+                                || last_err.contains("503")
+                                || last_err.contains("timed out");
+                            if is_transient && attempt + 1 < MAX_RETRIES {
+                                warn!(
+                                    agent_id = %agent_id,
+                                    attempt = attempt + 1,
+                                    "Workflow step transient error, retrying in {RETRY_DELAY_SECS}s: {last_err}"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    RETRY_DELAY_SECS * (attempt as u64 + 1),
+                                ))
+                                .await;
+                                continue;
+                            }
+                            return Err(last_err);
+                        }
+                    }
+                }
+                Err(last_err)
             }
         };
 

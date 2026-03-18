@@ -19,6 +19,8 @@ pub struct AnthropicDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     client: reqwest::Client,
+    /// Extra headers appended to every request (e.g. `X-Priority: high`).
+    extra_headers: Vec<(String, String)>,
 }
 
 impl AnthropicDriver {
@@ -33,7 +35,14 @@ impl AnthropicDriver {
                 .timeout(std::time::Duration::from_secs(600))
                 .build()
                 .expect("Failed to build Anthropic HTTP client"),
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// Return a clone of this driver with extra headers applied to every request.
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
     }
 }
 
@@ -213,12 +222,16 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic API request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
+                .header("content-type", "application/json");
+            for (k, v) in &self.extra_headers {
+                req_builder = req_builder.header(k.as_str(), v.as_str());
+            }
+            let resp = req_builder
                 .json(&api_request)
                 .send()
                 .await
@@ -334,12 +347,16 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic streaming request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
+                .header("content-type", "application/json");
+            for (k, v) in &self.extra_headers {
+                req_builder = req_builder.header(k.as_str(), v.as_str());
+            }
+            let resp = req_builder
                 .json(&api_request)
                 .send()
                 .await
@@ -356,7 +373,10 @@ impl LlmDriver for AnthropicDriver {
                         .and_then(|s| s.parse::<u64>().ok())
                         .map(|secs| secs * 1000)
                         .unwrap_or((attempt + 1) as u64 * 2000);
-                    warn!(status, retry_ms, attempt, "Rate limited / queued (stream), retrying");
+                    warn!(
+                        status,
+                        retry_ms, attempt, "Rate limited / queued (stream), retrying"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
                     continue;
                 }
