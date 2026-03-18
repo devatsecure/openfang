@@ -3505,15 +3505,10 @@ impl OpenFangKernel {
                 max_iterations: max_iter,
                 ..Default::default()
             }),
-            // Autonomous hands must run in Continuous mode so the background loop picks them up.
-            // Reactive (default) only fires on incoming messages, so autonomous hands would be inert.
-            schedule: if def.agent.max_iterations.is_some() {
-                ScheduleMode::Continuous {
-                    check_interval_secs: 60,
-                }
-            } else {
-                ScheduleMode::default()
-            },
+            // Hands are Reactive by default — they respond to messages and cron/workflow
+            // triggers but don't self-poll. This saves proxy quota for interactive sessions.
+            // Cron jobs trigger pipelines via workflow steps; no continuous loop needed.
+            schedule: ScheduleMode::default(),
             skills: def.skills.clone(),
             mcp_servers: def.mcp_servers.clone(),
             // Hands are curated packages — if they declare shell_exec, grant full exec access
