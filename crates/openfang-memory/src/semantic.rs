@@ -16,6 +16,69 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
+/// Raw row tuple from the memories table query.
+type MemoryRowTuple = (
+    String,          // id
+    String,          // agent_id
+    String,          // content
+    String,          // source
+    String,          // scope
+    f64,             // confidence
+    String,          // metadata json
+    String,          // created_at
+    String,          // accessed_at
+    i64,             // access_count
+    Option<Vec<u8>>, // embedding bytes
+);
+
+/// Parse a raw row tuple into a MemoryFragment.
+fn parse_memory_row(row: MemoryRowTuple) -> OpenFangResult<MemoryFragment> {
+    let (
+        id_str,
+        agent_str,
+        content,
+        source_str,
+        scope,
+        confidence,
+        meta_str,
+        created_str,
+        accessed_str,
+        access_count,
+        embedding_bytes,
+    ) = row;
+
+    let id = uuid::Uuid::parse_str(&id_str)
+        .map(MemoryId)
+        .map_err(|e| OpenFangError::Memory(e.to_string()))?;
+    let agent_id = uuid::Uuid::parse_str(&agent_str)
+        .map(openfang_types::agent::AgentId)
+        .map_err(|e| OpenFangError::Memory(e.to_string()))?;
+    let source: MemorySource = serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
+    let metadata: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&meta_str).unwrap_or_default();
+    let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
+
+    Ok(MemoryFragment {
+        id,
+        agent_id,
+        content,
+        embedding,
+        metadata,
+        source,
+        confidence: confidence as f32,
+        created_at,
+        accessed_at,
+        access_count: access_count as u64,
+        scope,
+    })
+}
+
 /// Semantic store backed by SQLite with optional vector search.
 #[derive(Clone)]
 pub struct SemanticStore {
@@ -148,7 +211,6 @@ impl SemanticStore {
                     .map_err(|e| OpenFangError::Serialization(e.to_string()))?;
                 sql.push_str(&format!(" AND source = ?{param_idx}"));
                 params.push(Box::new(source_str));
-                let _ = param_idx;
             }
         }
 
@@ -192,52 +254,8 @@ impl SemanticStore {
 
         let mut fragments = Vec::new();
         for row_result in rows {
-            let (
-                id_str,
-                agent_str,
-                content,
-                source_str,
-                scope,
-                confidence,
-                meta_str,
-                created_str,
-                accessed_str,
-                access_count,
-                embedding_bytes,
-            ) = row_result.map_err(|e| OpenFangError::Memory(e.to_string()))?;
-
-            let id = uuid::Uuid::parse_str(&id_str)
-                .map(MemoryId)
-                .map_err(|e| OpenFangError::Memory(e.to_string()))?;
-            let agent_id = uuid::Uuid::parse_str(&agent_str)
-                .map(openfang_types::agent::AgentId)
-                .map_err(|e| OpenFangError::Memory(e.to_string()))?;
-            let source: MemorySource =
-                serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
-            let metadata: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&meta_str).unwrap_or_default();
-            let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
-            let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
-
-            fragments.push(MemoryFragment {
-                id,
-                agent_id,
-                content,
-                embedding,
-                metadata,
-                source,
-                confidence: confidence as f32,
-                created_at,
-                accessed_at,
-                access_count: access_count as u64,
-                scope,
-            });
+            let tuple = row_result.map_err(|e| OpenFangError::Memory(e.to_string()))?;
+            fragments.push(parse_memory_row(tuple)?);
         }
 
         // If we have a query embedding, re-rank by cosine similarity
@@ -335,22 +353,16 @@ impl SemanticStore {
         if temporal_decay_days > 0 {
             let lambda = (2.0f32).ln() / temporal_decay_days as f32;
             for (score, frag) in &mut scored_frags {
-                let age_days = now
-                    .signed_duration_since(frag.created_at)
-                    .num_days()
-                    .max(0) as f32;
+                let age_days = now.signed_duration_since(frag.created_at).num_days().max(0) as f32;
                 *score *= (-lambda * age_days).exp();
             }
         }
 
         // Sort by score descending
-        scored_frags.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored_frags.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // Step 5: MMR diversity re-ranking
-        let selected = mmr_select(scored_frags, limit, mmr_lambda, qe);
+        let selected = mmr_select(scored_frags, limit, mmr_lambda);
 
         Ok(selected)
     }
@@ -378,13 +390,20 @@ impl SemanticStore {
             .unwrap_or(false);
 
         if !has_fts {
+            debug!("FTS5 table not found, skipping full-text search");
             return Ok(vec![]);
         }
 
-        // Sanitize query for FTS5: escape special characters
-        let sanitized = query
-            .replace('"', "\"\"")
-            .replace(['*', ':'], "");
+        // Sanitize query for FTS5: individually quote each word to prevent
+        // operator injection (AND, OR, NOT, NEAR, etc.)
+        let sanitized: String = query
+            .split_whitespace()
+            .map(|word| {
+                let clean = word.replace('"', "");
+                format!("\"{clean}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
 
         // Build FTS5 query — join with memories to get full row data
         let mut sql = String::from(
@@ -395,7 +414,7 @@ impl SemanticStore {
              WHERE memories_fts MATCH ?1 AND m.deleted = 0",
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        params.push(Box::new(format!("\"{}\"", sanitized)));
+        params.push(Box::new(sanitized));
         let mut param_idx = 2;
 
         if let Some(f) = filter {
@@ -407,7 +426,6 @@ impl SemanticStore {
             if let Some(ref scope) = f.scope {
                 sql.push_str(&format!(" AND m.scope = ?{param_idx}"));
                 params.push(Box::new(scope.clone()));
-                let _ = param_idx;
             }
         }
 
@@ -451,52 +469,8 @@ impl SemanticStore {
 
         let mut fragments = Vec::new();
         for row_result in rows {
-            let (
-                id_str,
-                agent_str,
-                content,
-                source_str,
-                scope,
-                confidence,
-                meta_str,
-                created_str,
-                accessed_str,
-                access_count,
-                embedding_bytes,
-            ) = row_result.map_err(|e| OpenFangError::Memory(e.to_string()))?;
-
-            let id = uuid::Uuid::parse_str(&id_str)
-                .map(MemoryId)
-                .map_err(|e| OpenFangError::Memory(e.to_string()))?;
-            let agent_id = uuid::Uuid::parse_str(&agent_str)
-                .map(openfang_types::agent::AgentId)
-                .map_err(|e| OpenFangError::Memory(e.to_string()))?;
-            let source: MemorySource =
-                serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
-            let metadata: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&meta_str).unwrap_or_default();
-            let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
-            let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
-
-            fragments.push(MemoryFragment {
-                id,
-                agent_id,
-                content,
-                embedding,
-                metadata,
-                source,
-                confidence: confidence as f32,
-                created_at,
-                accessed_at,
-                access_count: access_count as u64,
-                scope,
-            });
+            let tuple = row_result.map_err(|e| OpenFangError::Memory(e.to_string()))?;
+            fragments.push(parse_memory_row(tuple)?);
         }
 
         Ok(fragments)
@@ -560,7 +534,6 @@ fn mmr_select(
     candidates: Vec<(f32, MemoryFragment)>,
     limit: usize,
     lambda: f32,
-    query_embedding: &[f32],
 ) -> Vec<MemoryFragment> {
     if candidates.is_empty() || limit == 0 {
         return vec![];
@@ -601,7 +574,6 @@ fn mmr_select(
         selected.push(frag);
     }
 
-    let _ = query_embedding; // used conceptually via scores; kept for API symmetry
     selected
 }
 
@@ -946,15 +918,10 @@ mod tests {
             scope: "episodic".to_string(),
         };
 
-        let candidates = vec![
-            (1.0, frag_a),
-            (0.95, frag_b),
-            (0.5, frag_c),
-        ];
+        let candidates = vec![(1.0, frag_a), (0.95, frag_b), (0.5, frag_c)];
 
-        let query_emb = vec![1.0, 0.0, 0.0];
         // Low lambda = favor diversity
-        let selected = mmr_select(candidates, 2, 0.3, &query_emb);
+        let selected = mmr_select(candidates, 2, 0.3);
         assert_eq!(selected.len(), 2);
         // First should be A (highest score), second should be C (diverse)
         assert_eq!(selected[0].content, "A");

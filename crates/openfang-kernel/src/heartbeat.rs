@@ -15,8 +15,8 @@ const DEFAULT_CHECK_INTERVAL_SECS: u64 = 30;
 
 /// Multiplier: agent is considered unresponsive if inactive for this many
 /// multiples of its heartbeat interval.
-/// Set to 20x (600s = 10 minutes) to accommodate long LLM calls in workflows.
-const UNRESPONSIVE_MULTIPLIER: u64 = 20;
+/// Set to 6x (180s = 3 minutes). Workflow steps use their own per-step timeouts.
+const UNRESPONSIVE_MULTIPLIER: u64 = 6;
 
 /// Result of a heartbeat check.
 #[derive(Debug, Clone)]
@@ -202,7 +202,7 @@ mod tests {
     fn test_heartbeat_config_default() {
         let config = HeartbeatConfig::default();
         assert_eq!(config.check_interval_secs, 30);
-        assert_eq!(config.default_timeout_secs, 600); // 30 * 20
+        assert_eq!(config.default_timeout_secs, 180); // 30 * 6
     }
 
     #[test]
